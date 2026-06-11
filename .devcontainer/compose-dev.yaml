@@ -1,6 +1,6 @@
 services:
   seis-static:
-    image: seisviewer2d-dev:latest
+    image: seis-static:latest
     build:
       context: ..
       dockerfile: Dockerfile
@@ -54,6 +54,6 @@ services:
         read_only: true
     working_dir: /workspace
     ports:
-      - "8000:8000"
+      - "8009:8000"
     stdin_open: true
     tty: true
