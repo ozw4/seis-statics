@@ -1,0 +1,52 @@
+# Python 関連
+*.py[cod]
+*.ipynb_checkpoints
+**/*.egg-info/
+**/__pycache__/
+**/*.pyc
+
+# Jupyter ノートブックのチェックポイント
+.ipynb_checkpoints/
+
+# VSCode 設定ファイル
+.vscode/
+
+# OS ファイル
+.DS_Store
+Thumbs.db
+.codex
+
+# 環境設定
+.env
+*.env
+
+# 実行ログや中間ファイル
+*.npz
+*.log
+*.out
+*.bak
+*.npy
+*.tdms
+*.sgy
+*.segy
+*.png
+*.pth
+*.csv
+*.json
+*.npz
+data/
+result/
+tmp_code/
+debug_*/
+# compiled コード
+*.so
+*.o
+*.a
+*.pt
+*patch
+*.db
+.work
+.work/
+vendor/issue_forge
+vendor/issue_forge/
+.venv/
