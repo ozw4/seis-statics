@@ -214,6 +214,11 @@ class RefractionStaticModelOptions:
                 raise ValueError('model.refractor_cell is required when model.bedrock_velocity_mode is solve_cell')
         elif self.refractor_cell is not None:
             raise ValueError('model.refractor_cell is only allowed when model.bedrock_velocity_mode is solve_cell')
+        if self.bedrock_velocity_mode in {'solve_global', 'solve_cell'} and self.initial_bedrock_velocity_m_s is None:
+            raise ValueError(
+                'model.initial_bedrock_velocity_m_s is required when '
+                'model.bedrock_velocity_mode is solve_global or solve_cell'
+            )
 
     @property
     def enabled_refraction_layer_count(self) -> int:

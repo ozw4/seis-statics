@@ -72,6 +72,26 @@ def test_refraction_layer_config_preserves_legacy_one_layer_cell_controls() -> N
     )
 
 
+@pytest.mark.parametrize('bedrock_velocity_mode', ('solve_global', 'solve_cell'))
+def test_refraction_layer_config_rejects_legacy_solve_model_without_initial_velocity(
+    bedrock_velocity_mode: str,
+) -> None:
+    refractor_cell = None
+    if bedrock_velocity_mode == 'solve_cell':
+        refractor_cell = RefractionStaticRefractorCellOptions(
+            number_of_cell_x=4,
+            size_of_cell_x_m=100.0,
+            x_coordinate_origin_m=0.0,
+        )
+
+    with pytest.raises(ValueError, match='initial_bedrock_velocity_m_s'):
+        RefractionStaticModelOptions(
+            first_layer=RefractionStaticFirstLayerOptions(weathering_velocity_m_s=500.0),
+            bedrock_velocity_mode=bedrock_velocity_mode,
+            refractor_cell=refractor_cell,
+        )
+
+
 def test_refraction_layer_config_normalizes_two_and_three_layer_models() -> None:
     first_layer = RefractionStaticFirstLayerOptions(weathering_velocity_m_s=500.0)
     two_layer_model = RefractionStaticModelOptions(

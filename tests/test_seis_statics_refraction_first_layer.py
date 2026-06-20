@@ -15,7 +15,8 @@ from seis_statics.refraction import (
 
 def test_refraction_first_layer_normalize_constant_model() -> None:
     model = RefractionStaticModelOptions(
-        first_layer=RefractionStaticFirstLayerOptions(weathering_velocity_m_s=600.0)
+        first_layer=RefractionStaticFirstLayerOptions(weathering_velocity_m_s=600.0),
+        initial_bedrock_velocity_m_s=1700.0,
     )
 
     resolved = normalize_refraction_first_layer_request(model)
@@ -27,7 +28,10 @@ def test_refraction_first_layer_normalize_constant_model() -> None:
 
 
 def test_refraction_first_layer_resolve_and_validate_match() -> None:
-    model = RefractionStaticModelOptions(weathering_velocity_m_s=500.0)
+    model = RefractionStaticModelOptions(
+        weathering_velocity_m_s=500.0,
+        initial_bedrock_velocity_m_s=1700.0,
+    )
     resolved = ResolvedRefractionFirstLayer(
         mode='constant',
         weathering_velocity_m_s=500.0,
@@ -51,7 +55,8 @@ def test_refraction_first_layer_rejects_mode_and_velocity_mismatch() -> None:
             mode='estimate_direct_arrival',
             min_direct_offset_m=100.0,
             max_direct_offset_m=500.0,
-        )
+        ),
+        initial_bedrock_velocity_m_s=1700.0,
     )
     resolved = ResolvedRefractionFirstLayer(
         mode='constant',

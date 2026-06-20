@@ -19,7 +19,10 @@ from seis_statics.refraction import (
 
 def test_refraction_options_construct_shared_defaults_without_mutable_defaults() -> None:
     first_layer = RefractionStaticFirstLayerOptions(weathering_velocity_m_s=500.0)
-    model = RefractionStaticModelOptions(first_layer=first_layer)
+    model = RefractionStaticModelOptions(
+        first_layer=first_layer,
+        initial_bedrock_velocity_m_s=1700.0,
+    )
     solver_a = RefractionStaticSolverOptions()
     solver_b = RefractionStaticSolverOptions()
 
