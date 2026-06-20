@@ -1103,12 +1103,22 @@ def _node_coverage_is_safe(
     *,
     row_used_mask: np.ndarray,
 ) -> bool:
-    counts = np.zeros(design.n_active_nodes, dtype=np.int64)
     row_indices = np.flatnonzero(row_used_mask)
     if row_indices.size == 0:
         return False
-    np.add.at(counts, design.source_node_col[row_indices], 1)
-    np.add.at(counts, design.receiver_node_col[row_indices], 1)
+    node_pos = np.concatenate(
+        (
+            design.source_node_col[row_indices],
+            design.receiver_node_col[row_indices],
+        )
+    )
+    count_row_index = np.concatenate((row_indices, row_indices))
+    unique_pair_key = np.unique(node_pos * int(design.n_observations) + count_row_index)
+    unique_node_pos = unique_pair_key // int(design.n_observations)
+    counts = np.bincount(
+        unique_node_pos,
+        minlength=int(design.n_active_nodes),
+    ).astype(np.int64, copy=False)
     return bool(np.all(counts >= int(design.min_observations_per_node)))
 
 

@@ -358,6 +358,50 @@ def test_refraction_solver_robust_safe_rejection_preserves_used_floor() -> None:
     np.testing.assert_array_equal(result.used_observation_mask_sorted, valid_mask)
 
 
+def test_refraction_solver_robust_safe_rejection_deduplicates_same_node_rows() -> None:
+    fixed_velocity = 2500.0
+    source_node_id = np.asarray([10, 10], dtype=np.int64)
+    receiver_node_id = np.asarray([10, 10], dtype=np.int64)
+    distance_m = np.asarray([500.0, 600.0], dtype=np.float64)
+    valid_mask = np.ones(2, dtype=bool)
+    pick_time = 2.0 * 0.03 + distance_m / fixed_velocity
+    pick_time[1] += 0.1
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=2,
+        n_traces=2,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(
+            min_picks_per_node=2,
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=0.5,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            ),
+        ),
+    )
+
+    assert result.robust_stop_reason == 'safe_rejection'
+    assert result.n_rejected_observations == 0
+    np.testing.assert_array_equal(result.used_observation_mask_sorted, valid_mask)
+    np.testing.assert_array_equal(result.node_observation_count, [2])
+
+
 def test_refraction_solver_rejects_mismatched_design_model_modes() -> None:
     source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
         _known_global_arrays()
