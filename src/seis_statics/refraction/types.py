@@ -107,6 +107,25 @@ class RefractionUpholeResult:
 
 
 @dataclass(frozen=True)
+class RefractionManualStaticResult:
+    """Resolved manual static values matched to source and receiver endpoints."""
+
+    source_endpoint_key: np.ndarray
+    source_endpoint_id: np.ndarray | None
+    source_node_id: np.ndarray
+    source_manual_static_shift_s: np.ndarray
+    source_manual_static_status: np.ndarray
+
+    receiver_endpoint_key: np.ndarray
+    receiver_endpoint_id: np.ndarray | None
+    receiver_node_id: np.ndarray
+    receiver_manual_static_shift_s: np.ndarray
+    receiver_manual_static_status: np.ndarray
+
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class RefractionEndpointFieldCorrectionResult:
     """Endpoint-level source-depth, uphole, and manual static corrections."""
 
@@ -176,6 +195,7 @@ __all__ = [
     'RefractionLayerKind',
     'RefractionLayerObservationMasks',
     'RefractionLayerVelocityMode',
+    'RefractionManualStaticResult',
     'RefractionSourceDepthResult',
     'RefractionSourceDepthMode',
     'RefractionSourceDepthStatus',
