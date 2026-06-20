@@ -121,7 +121,7 @@ def _valid_observation_mask(values: object | None, *, shape: tuple[int, ...]) ->
 
 def _base_rejection_reason(values: object | None, *, shape: tuple[int, ...]) -> np.ndarray:
     if values is None:
-        return np.full(shape, INVALID_OBSERVATION_REJECTION_REASON, dtype=str)
+        return np.full(shape, INVALID_OBSERVATION_REJECTION_REASON, dtype='<U64')
     return coerce_1d_string_array(
         values,
         name='rejection_reason_sorted',

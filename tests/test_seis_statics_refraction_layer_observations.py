@@ -143,3 +143,15 @@ def test_refraction_layer_observations_keep_used_masks_exclusive_with_overlap() 
     assert masks.layer_rejection_reason_sorted['v3_t2'][0] == (
         ALREADY_ASSIGNED_REJECTION_REASON
     )
+
+
+def test_refraction_layer_observations_default_invalid_reason_is_not_truncated() -> None:
+    masks = build_refraction_layer_observation_masks(
+        layer_config=_three_layer_config(),
+        offset_m_sorted=np.asarray([250.0]),
+        valid_observation_mask_sorted=np.asarray([False]),
+    )
+
+    assert masks.layer_rejection_reason_sorted['vsub_t3'][0] == (
+        INVALID_OBSERVATION_REJECTION_REASON
+    )
