@@ -8,6 +8,7 @@ from seis_statics.refraction import (
     RefractionStaticFirstLayerOptions,
     RefractionStaticLayerOptions,
     RefractionStaticModelOptions,
+    RefractionStaticRefractorCellOptions,
     normalize_refraction_layer_config,
 )
 
@@ -35,6 +36,38 @@ def test_refraction_layer_config_normalizes_legacy_one_layer_v2_model() -> None:
             fixed_velocity_m_s=1800.0,
             min_velocity_m_s=1200.0,
             max_velocity_m_s=3000.0,
+        ),
+    )
+
+
+def test_refraction_layer_config_preserves_legacy_one_layer_cell_controls() -> None:
+    model = RefractionStaticModelOptions(
+        first_layer=RefractionStaticFirstLayerOptions(weathering_velocity_m_s=500.0),
+        bedrock_velocity_mode='solve_cell',
+        initial_bedrock_velocity_m_s=1800.0,
+        refractor_cell=RefractionStaticRefractorCellOptions(
+            number_of_cell_x=4,
+            size_of_cell_x_m=100.0,
+            x_coordinate_origin_m=0.0,
+            min_observations_per_cell=7,
+            velocity_smoothing_weight=0.25,
+        ),
+    )
+
+    config = normalize_refraction_layer_config(model)
+
+    assert config.layers == (
+        RefractionLayerConfigLayer(
+            kind='v2_t1',
+            min_offset_m=None,
+            max_offset_m=None,
+            velocity_mode='solve_cell',
+            initial_velocity_m_s=1800.0,
+            fixed_velocity_m_s=None,
+            min_velocity_m_s=1200.0,
+            max_velocity_m_s=6000.0,
+            min_observations_per_cell=7,
+            smoothing_weight=0.25,
         ),
     )
 

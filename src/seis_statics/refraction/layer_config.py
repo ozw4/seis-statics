@@ -115,6 +115,7 @@ def normalize_refraction_layer_config(
             layers=layers,
             allow_overlapping_layer_gates=model.allow_overlapping_layer_gates,
         )
+    refractor_cell = model.refractor_cell
     return RefractionLayerConfig(
         layers=(
             RefractionLayerConfigLayer(
@@ -126,6 +127,14 @@ def normalize_refraction_layer_config(
                 fixed_velocity_m_s=model.bedrock_velocity_m_s,
                 min_velocity_m_s=model.min_bedrock_velocity_m_s,
                 max_velocity_m_s=model.max_bedrock_velocity_m_s,
+                min_observations_per_cell=(
+                    None
+                    if refractor_cell is None
+                    else refractor_cell.min_observations_per_cell
+                ),
+                smoothing_weight=(
+                    None if refractor_cell is None else refractor_cell.velocity_smoothing_weight
+                ),
             ),
         ),
     )
