@@ -1444,8 +1444,8 @@ def _build_solver_qc(
     qc = {
         'method': 'gli_variable_thickness',
         'bedrock_velocity_mode': design.bedrock_velocity_mode,
-        'bedrock_velocity_m_s': float(bedrock_velocity_m_s),
-        'bedrock_slowness_s_per_m': float(bedrock_slowness_s_per_m),
+        'bedrock_velocity_m_s': _json_finite_float(bedrock_velocity_m_s),
+        'bedrock_slowness_s_per_m': _json_finite_float(bedrock_slowness_s_per_m),
         'bedrock_velocity_status': bedrock_velocity_status,
         'n_observations': int(design.n_observations),
         'n_initial_used_observations': int(design.n_observations),
@@ -1539,6 +1539,13 @@ def _optional_float(value: float | None) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _json_finite_float(value: float) -> float | None:
+    out = float(value)
+    if not np.isfinite(out):
+        return None
+    return out
 
 
 __all__ = [

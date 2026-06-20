@@ -186,6 +186,7 @@ def build_refraction_static_design_matrix(
             input_model=input_model,
             model=model,
             resolved_first_layer=resolved_first_layer,
+            min_observations_per_node=min_observations_per_node,
             include_diagnostics=include_diagnostics,
         )
 

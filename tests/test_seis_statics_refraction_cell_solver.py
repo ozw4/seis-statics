@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from seis_statics.refraction import (
     LOW_FOLD_CELL_VELOCITY_STATUS,
+    RefractionEndpointTable,
+    RefractionStaticInputModel,
     RefractionStaticModelOptions,
     RefractionStaticRefractorCellOptions,
     RefractionStaticRobustOptions,
     RefractionStaticSolverOptions,
     build_refraction_static_design_matrix_from_arrays,
+    solve_refraction_static_least_squares,
     solve_refraction_static_design_least_squares,
 )
 
@@ -29,6 +34,7 @@ def _cell_model(
     smoothing_weight: float = 0.0,
     smoothing_reference_distance_m: float | None = None,
     initial_velocity: float = 2600.0,
+    min_observations_per_cell: int = 1,
 ) -> RefractionStaticModelOptions:
     return RefractionStaticModelOptions(
         weathering_velocity_m_s=500.0,
@@ -40,7 +46,7 @@ def _cell_model(
             number_of_cell_x=n_cells,
             size_of_cell_x_m=100.0,
             x_coordinate_origin_m=0.0,
-            min_observations_per_cell=1,
+            min_observations_per_cell=min_observations_per_cell,
             velocity_smoothing_weight=smoothing_weight,
             smoothing_reference_distance_m=smoothing_reference_distance_m,
         ),
@@ -79,6 +85,76 @@ def _cell_synthetic_arrays() -> tuple[np.ndarray, ...]:
     )
     valid_mask = np.ones(source_node_id.shape, dtype=bool)
     return source_node_id, receiver_node_id, distance_m, midpoint_cell_id, pick_time, valid_mask
+
+
+def _high_level_cell_input_model() -> RefractionStaticInputModel:
+    source_node_id = np.asarray([10, 30, 10, 10], dtype=np.int64)
+    receiver_node_id = np.asarray([20, 20, 20, 20], dtype=np.int64)
+    distance_m = np.asarray([500.0, 510.0, 700.0, 710.0], dtype=np.float64)
+    midpoint_cell_id = np.asarray([0, 0, 1, 1], dtype=np.int64)
+    t1_by_node = {10: 0.03, 20: 0.04, 30: 0.05}
+    slowness_by_cell = {0: 1.0 / 2400.0, 1: 1.0 / 3000.0}
+    pick_time = np.asarray(
+        [
+            t1_by_node[int(src)]
+            + t1_by_node[int(rec)]
+            + dist * slowness_by_cell[int(cell)]
+            for src, rec, dist, cell in zip(
+                source_node_id,
+                receiver_node_id,
+                distance_m,
+                midpoint_cell_id,
+                strict=True,
+            )
+        ],
+        dtype=np.float64,
+    )
+    n_traces = int(pick_time.shape[0])
+    endpoint_table = RefractionEndpointTable(
+        node_id=np.asarray([10, 20, 30], dtype=np.int64),
+        endpoint_id=np.asarray([100, 200, 300], dtype=np.int64),
+        x_m=np.asarray([0.0, 100.0, 200.0], dtype=np.float64),
+        y_m=np.zeros(3, dtype=np.float64),
+        elevation_m=np.zeros(3, dtype=np.float64),
+        kind=np.asarray(['source', 'receiver', 'source']),
+        pick_count=np.asarray([3, 4, 1], dtype=np.int64),
+    )
+    return RefractionStaticInputModel(
+        file_id='unit',
+        n_traces=n_traces,
+        sorted_trace_index=np.arange(n_traces, dtype=np.int64),
+        pick_time_s_sorted=pick_time,
+        valid_pick_mask_sorted=np.ones(n_traces, dtype=bool),
+        valid_observation_mask_sorted=np.ones(n_traces, dtype=bool),
+        source_id_sorted=np.asarray([1, 3, 1, 1], dtype=np.int64),
+        receiver_id_sorted=np.asarray([2, 2, 2, 2], dtype=np.int64),
+        source_x_m_sorted=np.asarray([0.0, 0.0, 100.0, 100.0], dtype=np.float64),
+        source_y_m_sorted=np.zeros(n_traces, dtype=np.float64),
+        receiver_x_m_sorted=np.asarray([20.0, 20.0, 120.0, 120.0], dtype=np.float64),
+        receiver_y_m_sorted=np.zeros(n_traces, dtype=np.float64),
+        source_elevation_m_sorted=np.zeros(n_traces, dtype=np.float64),
+        receiver_elevation_m_sorted=np.zeros(n_traces, dtype=np.float64),
+        source_depth_m_sorted=None,
+        geometry_distance_m_sorted=distance_m,
+        offset_m_sorted=None,
+        distance_m_sorted=distance_m,
+        source_endpoint_key_sorted=np.asarray(
+            ['source:10', 'source:30', 'source:10', 'source:10']
+        ),
+        receiver_endpoint_key_sorted=np.asarray(
+            ['receiver:20', 'receiver:20', 'receiver:20', 'receiver:20']
+        ),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        node_x_m=endpoint_table.x_m,
+        node_y_m=endpoint_table.y_m,
+        node_elevation_m=endpoint_table.elevation_m,
+        node_kind=endpoint_table.kind,
+        rejection_reason_sorted=np.asarray(['ok', 'ok', 'ok', 'ok']),
+        qc={},
+        endpoint_table=endpoint_table,
+        metadata={},
+    )
 
 
 def _cell_design(
@@ -141,6 +217,26 @@ def test_refraction_cell_solver_recovers_cell_v2_and_row_midpoint_v2() -> None:
     assert set(result.cell_velocity_status.tolist()) == {'solved'}
     assert result.system.n_smoothing_rows == 0
     assert result.qc['cell_velocity_status_counts'] == {'solved': 2}
+    assert result.qc['bedrock_velocity_m_s'] is None
+    assert result.qc['bedrock_slowness_s_per_m'] is None
+    json.dumps(result.qc, allow_nan=False)
+
+
+def test_refraction_cell_solver_high_level_forwards_min_picks_per_node() -> None:
+    model = _cell_model(n_cells=2, min_observations_per_cell=2)
+
+    result = solve_refraction_static_least_squares(
+        input_model=_high_level_cell_input_model(),
+        model=model,
+        solver_options=_solver_options(min_picks_per_node=2),
+    )
+
+    assert result.design.qc['min_observations_per_node'] == 2
+    np.testing.assert_array_equal(result.design.low_fold_node_id, [30])
+    np.testing.assert_array_equal(result.design.row_trace_index_sorted, [2, 3])
+    assert result.design.qc['n_observations_rejected_by_low_fold_node'] == 1
+    assert result.design.qc['n_observations_rejected_by_low_fold_cell'] == 1
+    json.dumps(result.qc, allow_nan=False)
 
 
 def test_refraction_cell_solver_smoothing_pulls_neighbor_slowness_together() -> None:
