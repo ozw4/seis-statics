@@ -115,6 +115,20 @@ def test_head_wave_moveout_uses_offset_header_distance_when_requested() -> None:
     np.testing.assert_allclose(result.moveout_time_s_sorted, np.abs(OFFSET) / 2500.0)
 
 
+def test_offset_header_distance_does_not_validate_unused_bad_geometry() -> None:
+    source_x = _inputs().source_x_m_sorted.copy()
+    source_x[2] = np.nan
+
+    result = _compute(
+        _inputs(source_x_m_sorted=source_x),
+        distance_source='offset_header',
+    )
+
+    np.testing.assert_allclose(result.distance_m_sorted, np.abs(OFFSET))
+    np.testing.assert_allclose(result.moveout_time_s_sorted, np.abs(OFFSET) / 2500.0)
+    assert result.geometry_offset_mismatch_m_sorted is None
+
+
 def test_head_wave_moveout_auto_uses_geometry_when_available() -> None:
     result = _compute(distance_source='auto')
 
@@ -132,8 +146,34 @@ def test_head_wave_moveout_auto_uses_offset_when_geometry_unavailable() -> None:
     np.testing.assert_allclose(result.moveout_time_s_sorted, np.abs(OFFSET) / 2500.0)
 
 
+def test_auto_distance_does_not_validate_unused_bad_offset_when_geometry_is_valid() -> None:
+    offset = OFFSET.copy()
+    offset[1] = np.inf
+
+    result = _compute(_inputs(offset_sorted=offset), distance_source='auto')
+
+    np.testing.assert_allclose(result.distance_m_sorted, GEOMETRY_DISTANCE)
+    assert result.offset_abs_m_sorted is None
+
+
 def test_head_wave_moveout_none_returns_zero_moveout() -> None:
     result = _compute(model='none', distance_source='offset_header')
+
+    np.testing.assert_allclose(result.distance_m_sorted, np.zeros(N_TRACES))
+    np.testing.assert_allclose(result.moveout_time_s_sorted, np.zeros(N_TRACES))
+    np.testing.assert_array_equal(result.valid_moveout_mask_sorted, np.ones(N_TRACES, dtype=bool))
+
+
+def test_none_moveout_does_not_require_distance_metadata() -> None:
+    source_x = _inputs().source_x_m_sorted.copy()
+    source_x[2] = np.nan
+
+    result = _compute(
+        _inputs(source_x_m_sorted=source_x, offset_sorted=None),
+        model='none',
+        distance_source='offset_header',
+        offset_byte=None,
+    )
 
     np.testing.assert_allclose(result.distance_m_sorted, np.zeros(N_TRACES))
     np.testing.assert_allclose(result.moveout_time_s_sorted, np.zeros(N_TRACES))
@@ -182,6 +222,32 @@ def test_head_wave_moveout_rejects_non_finite_offset() -> None:
 
     with pytest.raises(ValueError, match='offset_sorted'):
         _compute(_inputs(offset_sorted=offset), distance_source='offset_header')
+
+
+def test_geometry_distance_does_not_validate_unused_bad_offset() -> None:
+    offset = OFFSET.copy()
+    offset[1] = np.inf
+
+    result = _compute(_inputs(offset_sorted=offset), distance_source='geometry')
+
+    np.testing.assert_allclose(result.distance_m_sorted, GEOMETRY_DISTANCE)
+    assert result.offset_abs_m_sorted is None
+
+
+def test_offset_header_allow_missing_offset_returns_invalid_moveout() -> None:
+    result = _compute(
+        _inputs(offset_sorted=None),
+        distance_source='offset_header',
+        offset_byte=None,
+        allow_missing_offset=True,
+    )
+
+    assert np.all(np.isnan(result.distance_m_sorted))
+    assert np.all(np.isnan(result.moveout_time_s_sorted))
+    np.testing.assert_array_equal(
+        result.valid_moveout_mask_sorted,
+        np.zeros(N_TRACES, dtype=bool),
+    )
 
 
 def test_head_wave_moveout_returns_non_negative_distance_and_time() -> None:

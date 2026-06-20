@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import numpy as np
@@ -330,10 +330,14 @@ def _build_robust_result(
         final_solver_result.used_trace_mask_sorted,
         dtype=bool,
     )
+    masked_final_solver_result = _mask_unused_trace_delays(
+        final_solver_result,
+        used_trace_mask=final_used_mask,
+    )
     rejected_mask = np.ascontiguousarray(initial_used_mask & ~final_used_mask, dtype=bool)
     return TimeTermRobustSolveResult(
         initial_solver_result=initial_solver_result,
-        final_solver_result=final_solver_result,
+        final_solver_result=masked_final_solver_result,
         robust_options=robust_options,
         sparse_solver_options=sparse_solver_options,
         initial_used_trace_mask_sorted=np.ascontiguousarray(
@@ -351,6 +355,28 @@ def _build_robust_result(
         n_initial_used_traces=int(np.count_nonzero(initial_used_mask)),
         n_final_used_traces=int(np.count_nonzero(final_used_mask)),
         n_rejected_total=int(np.count_nonzero(rejected_mask)),
+    )
+
+
+def _mask_unused_trace_delays(
+    solver_result: TimeTermSparseSolverResult,
+    *,
+    used_trace_mask: np.ndarray,
+) -> TimeTermSparseSolverResult:
+    if np.all(used_trace_mask):
+        return solver_result
+    estimated_delay = _coerce_1d_real_numeric_float64(
+        solver_result.estimated_trace_time_term_delay_s_sorted,
+        name='estimated_trace_time_term_delay_s_sorted',
+        expected_shape=used_trace_mask.shape,
+    ).copy()
+    estimated_delay[~used_trace_mask] = np.nan
+    return replace(
+        solver_result,
+        estimated_trace_time_term_delay_s_sorted=np.ascontiguousarray(
+            estimated_delay,
+            dtype=np.float64,
+        ),
     )
 
 

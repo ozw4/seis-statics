@@ -10,6 +10,7 @@ from seis_statics.time_term import (
     TimeTermDesignMatrix,
     TimeTermRobustOptions,
     TimeTermSparseSolverOptions,
+    compose_time_term_applied_shifts,
     solve_time_term_robust_least_squares,
     solve_time_term_sparse_least_squares,
 )
@@ -177,8 +178,14 @@ def test_rejected_trace_keeps_nan_applied_shift_policy() -> None:
         robust_options=TimeTermRobustOptions(method='mad', threshold=3.0),
     )
 
-    delay = result.final_solver_result.estimated_trace_time_term_delay_s_sorted.copy()
-    delay[~result.final_used_trace_mask_sorted] = np.nan
+    delay = result.final_solver_result.estimated_trace_time_term_delay_s_sorted
+    shifts = compose_time_term_applied_shifts(
+        trace_time_term_delay_s_sorted=delay,
+        datum_applied_shift_s_sorted=np.zeros(delay.shape[0], dtype=np.float64),
+        residual_applied_shift_s_sorted=np.zeros(delay.shape[0], dtype=np.float64),
+    )
 
     assert np.isnan(delay[13])
     assert np.all(np.isfinite(delay[result.final_used_trace_mask_sorted]))
+    assert shifts.valid_shift_mask_sorted[13].item() is False
+    assert np.isnan(shifts.final_applied_shift_s_sorted[13])

@@ -80,7 +80,16 @@ def compute_time_term_moveout(
         config.offset_byte,
         name='offset_byte',
     )
-    if model != 'none' and distance_source == 'offset_header' and offset_byte is None:
+    allow_missing_offset = _validate_bool(
+        config.allow_missing_offset,
+        name='allow_missing_offset',
+    )
+    if (
+        model != 'none'
+        and distance_source == 'offset_header'
+        and offset_byte is None
+        and not allow_missing_offset
+    ):
         raise ValueError('offset_byte is required for offset_header distance')
     refractor_velocity = _coerce_positive_finite_float(
         config.refractor_velocity_m_s,
@@ -119,25 +128,46 @@ def compute_time_term_moveout(
         receiver_y,
     )
     geometry_is_valid = _is_finite_nonnegative(geometry_distance)
-    if distance_source != 'auto' and not geometry_is_valid:
+    geometry_required = model != 'none' and distance_source == 'geometry'
+    if geometry_required and not geometry_is_valid:
         _validate_finite_nonnegative(
             geometry_distance,
             name='geometry_distance_m_sorted',
         )
 
+    offset_required = (
+        model != 'none'
+        and distance_source == 'offset_header'
+        and not allow_missing_offset
+    )
     offset_abs = _optional_offset_abs(
         inputs.offset_sorted,
         expected_shape=expected_shape,
-        required=distance_source == 'offset_header',
+        required=offset_required,
+        allow_invalid=not _must_validate_optional_offset(
+            model=model,
+            distance_source=distance_source,
+            geometry_is_valid=geometry_is_valid,
+            max_geometry_offset_mismatch_m=max_mismatch,
+        ),
     )
     mismatch = None
-    if offset_abs is not None:
+    if model != 'none' and offset_abs is not None and geometry_is_valid:
         mismatch = np.ascontiguousarray(geometry_distance - offset_abs, dtype=np.float64)
         if max_mismatch is not None and np.any(np.abs(mismatch) > max_mismatch):
             raise ValueError(
                 'geometry_offset_mismatch_m_sorted exceeds '
                 'max_geometry_offset_mismatch_m'
             )
+    elif max_mismatch is not None and model != 'none':
+        if not geometry_is_valid:
+            _validate_finite_nonnegative(
+                geometry_distance,
+                name='geometry_distance_m_sorted',
+            )
+        raise ValueError(
+            'offset_sorted is required for max_geometry_offset_mismatch_m'
+        )
 
     source_nodes = _coerce_1d_integer_int64(
         inputs.source_node_id_sorted,
@@ -162,14 +192,18 @@ def compute_time_term_moveout(
             geometry_distance=geometry_distance,
             geometry_is_valid=geometry_is_valid,
             offset_abs=offset_abs,
+            allow_missing_offset=allow_missing_offset,
+            n_traces=n_traces,
         )
-        _validate_finite_nonnegative(distance, name='distance_m_sorted')
+        if not allow_missing_offset or not np.any(~np.isfinite(distance)):
+            _validate_finite_nonnegative(distance, name='distance_m_sorted')
         # This is a positive propagation-time term, not an applied static shift.
         moveout_time = np.ascontiguousarray(distance / refractor_velocity, dtype=np.float64)
-        _validate_finite_nonnegative(
-            moveout_time,
-            name='moveout_time_s_sorted',
-        )
+        if not allow_missing_offset or not np.any(~np.isfinite(moveout_time)):
+            _validate_finite_nonnegative(
+                moveout_time,
+                name='moveout_time_s_sorted',
+            )
 
     valid_moveout_mask = np.ascontiguousarray(
         np.isfinite(distance)
@@ -312,6 +346,8 @@ def _select_distance(
     geometry_distance: np.ndarray,
     geometry_is_valid: bool,
     offset_abs: np.ndarray | None,
+    allow_missing_offset: bool,
+    n_traces: int,
 ) -> np.ndarray:
     if distance_source == 'geometry':
         return np.ascontiguousarray(geometry_distance, dtype=np.float64)
@@ -320,9 +356,13 @@ def _select_distance(
             return np.ascontiguousarray(geometry_distance, dtype=np.float64)
         if offset_abs is not None:
             return np.ascontiguousarray(offset_abs, dtype=np.float64)
+        if allow_missing_offset:
+            return np.full(int(n_traces), np.nan, dtype=np.float64)
         raise ValueError('auto distance requires finite geometry or offset_sorted')
     if distance_source == 'offset_header':
         if offset_abs is None:
+            if allow_missing_offset:
+                return np.full(int(n_traces), np.nan, dtype=np.float64)
             raise ValueError('offset_sorted is required for offset_header distance')
         return np.ascontiguousarray(offset_abs, dtype=np.float64)
     raise ValueError(f'unsupported distance_source: {distance_source!r}')
@@ -333,21 +373,43 @@ def _optional_offset_abs(
     *,
     expected_shape: tuple[int, ...],
     required: bool,
+    allow_invalid: bool,
 ) -> np.ndarray | None:
     if values is None:
         if required:
             raise ValueError('offset_sorted is required for offset_header distance')
         return None
-    offset = _coerce_1d_real_numeric_float64(
-        values,
-        name='offset_sorted',
-        expected_shape=expected_shape,
-    )
-    if not np.all(np.isfinite(offset)):
-        raise ValueError('offset_sorted must contain only finite values')
-    offset_abs = np.ascontiguousarray(np.abs(offset), dtype=np.float64)
-    _validate_finite_nonnegative(offset_abs, name='offset_abs_m_sorted')
+    try:
+        offset = _coerce_1d_real_numeric_float64(
+            values,
+            name='offset_sorted',
+            expected_shape=expected_shape,
+        )
+        if not np.all(np.isfinite(offset)):
+            raise ValueError('offset_sorted must contain only finite values')
+        offset_abs = np.ascontiguousarray(np.abs(offset), dtype=np.float64)
+        _validate_finite_nonnegative(offset_abs, name='offset_abs_m_sorted')
+    except ValueError:
+        if allow_invalid and not required:
+            return None
+        raise
     return offset_abs
+
+
+def _must_validate_optional_offset(
+    *,
+    model: TimeTermMoveoutModel,
+    distance_source: MoveoutDistanceSource,
+    geometry_is_valid: bool,
+    max_geometry_offset_mismatch_m: float | None,
+) -> bool:
+    if model == 'none':
+        return False
+    if max_geometry_offset_mismatch_m is not None:
+        return True
+    if distance_source == 'offset_header':
+        return True
+    return distance_source == 'auto' and not geometry_is_valid
 
 
 def _validate_model(value: object) -> TimeTermMoveoutModel:
@@ -360,6 +422,12 @@ def _validate_distance_source(value: object) -> MoveoutDistanceSource:
     if value in _DISTANCE_SOURCES:
         return value  # type: ignore[return-value]
     raise ValueError(f'unsupported distance_source: {value!r}')
+
+
+def _validate_bool(value: object, *, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f'{name} must be a bool')
+    return value
 
 
 def _validate_optional_trace_header_byte(value: object, *, name: str) -> int | None:
