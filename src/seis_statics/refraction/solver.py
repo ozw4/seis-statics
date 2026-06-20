@@ -323,7 +323,6 @@ def solve_refraction_static_design_least_squares(
     robust_result = _run_refraction_static_solver(
         design=design,
         system=system,
-        model=model,
         solver_options=options,
     )
     raw = robust_result.raw_result
@@ -788,7 +787,6 @@ def _run_refraction_static_solver(
     *,
     design: RefractionStaticDesignMatrix,
     system: RefractionStaticSolveSystem,
-    model: Any,
     solver_options: RefractionStaticSolverOptions,
 ) -> _RefractionStaticRobustRunResult:
     robust = solver_options.robust
@@ -891,7 +889,6 @@ def _run_refraction_static_solver(
         rejected_rows = _safe_rejection_rows(
             design=design,
             system=system,
-            model=model,
             initial_row_mask=initial_row_mask,
             current_row_mask=current_row_mask,
             candidate_rows=candidate_rows,
@@ -992,28 +989,32 @@ def _system_with_observation_row_mask(
         raise RefractionStaticSolverError(
             'robust rejection would drop all observations'
         )
-    tail_rows = np.arange(
-        system.n_observation_rows,
-        system.n_augmented_rows,
-        dtype=np.int64,
+    observation_rows = system.augmented_matrix[: system.n_observation_rows]
+    row_weights = sparse.diags(
+        mask.astype(np.float64, copy=False),
+        offsets=0,
+        shape=(system.n_observation_rows, system.n_observation_rows),
+        format='csr',
     )
-    selected_rows = np.ascontiguousarray(
-        np.concatenate((used_observation_rows, tail_rows)),
-        dtype=np.int64,
-    )
-    augmented_matrix = system.augmented_matrix[selected_rows].tocsr()
-    augmented_matrix.sort_indices()
-    augmented_rhs = np.ascontiguousarray(
-        system.augmented_rhs_s[selected_rows],
+    masked_observation_rows = (row_weights @ observation_rows).tocsr()
+    tail_rows = system.augmented_matrix[
+        system.n_observation_rows : system.n_augmented_rows
+    ]
+    augmented_matrix = sparse.vstack(
+        [masked_observation_rows, tail_rows],
+        format='csr',
         dtype=np.float64,
     )
+    augmented_matrix.sort_indices()
+    augmented_rhs = np.ascontiguousarray(system.augmented_rhs_s.copy(), dtype=np.float64)
+    augmented_rhs[: system.n_observation_rows] *= mask.astype(np.float64, copy=False)
     return RefractionStaticSolveSystem(
         augmented_matrix=augmented_matrix,
         augmented_rhs_s=augmented_rhs,
         lower_bounds=system.lower_bounds,
         upper_bounds=system.upper_bounds,
         initial_parameter_vector=system.initial_parameter_vector,
-        n_observation_rows=int(used_observation_rows.size),
+        n_observation_rows=system.n_observation_rows,
         n_smoothing_rows=system.n_smoothing_rows,
         n_damping_rows=system.n_damping_rows,
         n_gauge_rows=system.n_gauge_rows,
@@ -1035,7 +1036,6 @@ def _safe_rejection_rows(
     *,
     design: RefractionStaticDesignMatrix,
     system: RefractionStaticSolveSystem,
-    model: Any,
     initial_row_mask: np.ndarray,
     current_row_mask: np.ndarray,
     candidate_rows: np.ndarray,
@@ -1055,7 +1055,6 @@ def _safe_rejection_rows(
         if not _robust_row_mask_is_safe(
             design=design,
             system=system,
-            model=model,
             initial_row_mask=initial_row_mask,
             row_used_mask=trial,
             initial_source_receiver_component_count=initial_component_count,
@@ -1072,7 +1071,6 @@ def _robust_row_mask_is_safe(
     *,
     design: RefractionStaticDesignMatrix,
     system: RefractionStaticSolveSystem,
-    model: Any,
     initial_row_mask: np.ndarray,
     row_used_mask: np.ndarray,
     initial_source_receiver_component_count: int,
@@ -1106,7 +1104,6 @@ def _robust_row_mask_is_safe(
     if design.bedrock_velocity_mode == 'solve_cell':
         return _cell_coverage_is_safe(
             design,
-            model=model,
             row_used_mask=row_used_mask,
         )
     return True
@@ -1139,20 +1136,16 @@ def _node_coverage_is_safe(
 def _cell_coverage_is_safe(
     design: RefractionStaticDesignMatrix,
     *,
-    model: Any,
     row_used_mask: np.ndarray,
 ) -> bool:
     _validate_cell_design(design)
     if design.active_cell_id is None or design.row_midpoint_cell_id is None:
         raise RefractionStaticSolverError('solve_cell design requires cell metadata')
-    refractor_cell = getattr(model, 'refractor_cell', None)
-    min_observations = int(
-        getattr(
-            refractor_cell,
-            'min_observations_per_cell',
-            design.qc.get('min_observations_per_cell', 1),
+    if 'min_observations_per_cell' not in design.qc:
+        raise RefractionStaticSolverError(
+            'solve_cell design requires min_observations_per_cell QC'
         )
-    )
+    min_observations = int(design.qc['min_observations_per_cell'])
     if design.n_total_cells is None:
         raise RefractionStaticSolverError('solve_cell design requires n_total_cells')
     used_cell_id = design.row_midpoint_cell_id[row_used_mask]
@@ -1261,7 +1254,9 @@ def _run_lsq_linear(system: RefractionStaticSolveSystem) -> optimize.OptimizeRes
             verbose=0,
         )
     except Exception as exc:
-        raise RuntimeError('refraction static lsq_linear solve failed') from exc
+        raise RefractionStaticSolverError(
+            'refraction static lsq_linear solve failed'
+        ) from exc
     if result.x.shape != (system.n_parameters,):
         raise RefractionStaticSolverError('solver x shape mismatch')
     return result

@@ -254,6 +254,20 @@ def test_refraction_solver_robust_global_rejects_outlier_and_recovers_solution()
         result.rejected_iteration_sorted,
         [-1, -1, -1, -1, -1, 0],
     )
+    assert result.system.n_observation_rows == design.n_observations
+    assert result.system.n_augmented_rows == (
+        design.n_observations
+        + result.system.n_smoothing_rows
+        + result.system.n_damping_rows
+        + result.system.n_gauge_rows
+    )
+    observation_block = result.system.augmented_matrix[
+        : design.n_observations
+    ].toarray()
+    np.testing.assert_allclose(observation_block[:5], design.matrix[:5].toarray())
+    np.testing.assert_allclose(observation_block[5], 0.0)
+    np.testing.assert_allclose(result.system.augmented_rhs_s[:5], design.rhs_s[:5])
+    assert result.system.augmented_rhs_s[5] == 0.0
     assert len(result.robust_iteration_summaries) == 2
     assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 1
     assert result.qc['robust_iteration_count'] == 2

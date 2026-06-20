@@ -143,3 +143,74 @@ def test_refraction_cell_robust_synthetic_rejects_outlier_and_preserves_cells() 
     assert result.qc['design_matrix']['min_observations_per_active_cell'] == 2
     assert result.qc['design_matrix']['n_observations_used'] == 5
     assert result.rms_residual_s == pytest.approx(0.0, abs=1.0e-8)
+
+
+def test_refraction_cell_robust_safety_uses_design_min_cell_fold() -> None:
+    source_node_id = np.asarray([10, 10, 20, 20, 10, 20], dtype=np.int64)
+    receiver_node_id = np.asarray([30, 40, 30, 40, 30, 40], dtype=np.int64)
+    distance_m = np.asarray([500.0, 700.0, 600.0, 850.0, 900.0, 950.0])
+    midpoint_cell_id = np.asarray([0, 0, 0, 0, 1, 1], dtype=np.int64)
+    t1_by_node = {
+        10: 0.03,
+        20: 0.05,
+        30: 0.035,
+        40: 0.045,
+    }
+    slowness_by_cell = {
+        0: 1.0 / 2400.0,
+        1: 1.0 / 3000.0,
+    }
+    pick_time = np.asarray(
+        [
+            t1_by_node[int(src)]
+            + t1_by_node[int(rec)]
+            + dist * slowness_by_cell[int(cell)]
+            for src, rec, dist, cell in zip(
+                source_node_id,
+                receiver_node_id,
+                distance_m,
+                midpoint_cell_id,
+                strict=True,
+            )
+        ],
+        dtype=np.float64,
+    )
+    pick_time[5] += 1.0
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(source_node_id.shape, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='solve_cell',
+        midpoint_cell_id_sorted=midpoint_cell_id,
+        n_total_cells=2,
+        number_of_cell_x=2,
+        number_of_cell_y=1,
+        cell_assignment_mode='midpoint',
+        min_observations_per_cell=2,
+        n_traces=6,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_cell_model(),
+        solver_options=_solver_options(
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=1.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            )
+        ),
+    )
+
+    assert result.robust_stop_reason == 'safe_rejection'
+    assert result.n_rejected_observations == 0
+    assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 0
+    np.testing.assert_array_equal(result.cell_observation_count, [4, 2])
+    assert result.qc['design_matrix']['min_observations_per_active_cell'] == 2
