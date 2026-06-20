@@ -79,6 +79,49 @@ class RefractionLayerObservationMasks:
 
 
 @dataclass(frozen=True)
+class RefractionSourceDepthResult:
+    """Resolved source-depth values aggregated to source endpoints."""
+
+    source_endpoint_key: np.ndarray
+    source_endpoint_id: np.ndarray
+    source_node_id: np.ndarray
+    source_depth_m: np.ndarray
+    source_depth_status: np.ndarray
+    source_depth_pick_count: np.ndarray
+    source_depth_trace_count: np.ndarray
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RefractionUpholeResult:
+    """Resolved uphole-time values aggregated to source endpoints."""
+
+    source_endpoint_key: np.ndarray
+    source_endpoint_id: np.ndarray
+    source_node_id: np.ndarray
+    uphole_time_s: np.ndarray
+    uphole_status: np.ndarray
+    uphole_pick_count: np.ndarray
+    uphole_trace_count: np.ndarray
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RefractionEndpointFieldCorrectionResult:
+    """Endpoint-level source-depth, uphole, and manual static corrections."""
+
+    endpoint_kind: np.ndarray
+    endpoint_key: np.ndarray
+    endpoint_id: np.ndarray
+    node_id: np.ndarray
+    component_shift_s: dict[RefractionFieldCorrectionComponentName, np.ndarray]
+    component_status: dict[RefractionFieldCorrectionComponentName, np.ndarray]
+    total_field_shift_s: np.ndarray
+    field_static_status: np.ndarray
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class RefractionStaticInputModel:
     file_id: str
     n_traces: int
@@ -127,14 +170,17 @@ __all__ = [
     'BedrockVelocityMode',
     'REFRACTION_FIELD_CORRECTION_COMPONENT_NAMES',
     'RefractionEndpointTable',
+    'RefractionEndpointFieldCorrectionResult',
     'RefractionFieldCorrectionComponentName',
     'RefractionFirstLayerMode',
     'RefractionLayerKind',
     'RefractionLayerObservationMasks',
     'RefractionLayerVelocityMode',
+    'RefractionSourceDepthResult',
     'RefractionSourceDepthMode',
     'RefractionSourceDepthStatus',
     'RefractionStaticInputModel',
+    'RefractionUpholeResult',
     'RefractionUpholeStatus',
     'ResolvedRefractionFirstLayer',
 ]

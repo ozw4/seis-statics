@@ -81,20 +81,35 @@ from seis_statics.refraction.status import (
     REFRACTION_STATIC_STATUSES,
     classify_refraction_endpoint_static_status,
 )
+from seis_statics.refraction.source_depth import (
+    compute_source_depth_weathering_time_correction,
+    compute_source_depth_weathering_time_correction_from_result,
+    resolve_refraction_source_depth,
+    resolve_refraction_source_depth_for_input_model,
+)
 from seis_statics.refraction.types import (
     REFRACTION_FIELD_CORRECTION_COMPONENT_NAMES,
     BedrockVelocityMode,
     RefractionEndpointTable,
+    RefractionEndpointFieldCorrectionResult,
     RefractionFieldCorrectionComponentName,
     RefractionFirstLayerMode,
     RefractionLayerKind,
     RefractionLayerObservationMasks,
     RefractionLayerVelocityMode,
     RefractionSourceDepthMode,
+    RefractionSourceDepthResult,
     RefractionSourceDepthStatus,
     RefractionStaticInputModel,
+    RefractionUpholeResult,
     RefractionUpholeStatus,
     ResolvedRefractionFirstLayer,
+)
+from seis_statics.refraction.uphole import (
+    compute_uphole_time_correction,
+    compute_uphole_time_correction_from_result,
+    resolve_refraction_uphole,
+    resolve_refraction_uphole_for_input_model,
 )
 
 
@@ -117,6 +132,7 @@ __all__ = [
     'RefractionCellProjectedPoints',
     'RefractionCellProjectedSourceReceiver',
     'RefractionEndpointTable',
+    'RefractionEndpointFieldCorrectionResult',
     'RefractionFieldCorrectionComponentName',
     'RefractionFirstLayerMode',
     'RefractionLayerConfig',
@@ -125,6 +141,7 @@ __all__ = [
     'RefractionLayerObservationMasks',
     'RefractionLayerVelocityMode',
     'RefractionSourceDepthMode',
+    'RefractionSourceDepthResult',
     'RefractionSourceDepthStatus',
     'RefractionStaticConversionMode',
     'RefractionStaticConversionOptions',
@@ -151,6 +168,7 @@ __all__ = [
     'RefractionStaticRobustMethod',
     'RefractionStaticRobustOptions',
     'RefractionStaticSolverOptions',
+    'RefractionUpholeResult',
     'RefractionUpholeStatus',
     'ResolvedRefractionFirstLayer',
     'assign_observation_midpoint_cells',
@@ -160,7 +178,11 @@ __all__ = [
     'build_refraction_layer_observation_masks',
     'build_refraction_cell_grid',
     'classify_refraction_endpoint_static_status',
+    'compute_source_depth_weathering_time_correction',
+    'compute_source_depth_weathering_time_correction_from_result',
     'compute_source_receiver_midpoints',
+    'compute_uphole_time_correction',
+    'compute_uphole_time_correction_from_result',
     'effective_refraction_cell_grid_config',
     'layer_offset_gate_contains',
     'normalize_refraction_first_layer_request',
@@ -171,6 +193,10 @@ __all__ = [
     'refraction_cell_coordinate_metadata_from_config',
     'refraction_layer_observation_qc',
     'resolve_weathering_velocity_m_s',
+    'resolve_refraction_source_depth',
+    'resolve_refraction_source_depth_for_input_model',
+    'resolve_refraction_uphole',
+    'resolve_refraction_uphole_for_input_model',
     'resolved_first_layer_weathering_velocity_m_s',
     'validate_resolved_first_layer_velocity_match',
 ]
