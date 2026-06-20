@@ -83,6 +83,7 @@ def estimate_global_v1_from_direct_arrivals(
     data = _validate_input_model(input_model)
     candidate_mask = (
         data['valid_observation_mask_sorted']
+        & data['valid_pick_mask_sorted']
         & np.isfinite(data['pick_time_s_sorted'])
         & np.isfinite(data['distance_m_sorted'])
         & (data['distance_m_sorted'] >= min_offset)
@@ -344,6 +345,11 @@ def _validate_input_model(input_model: RefractionStaticInputModel) -> dict[str, 
             input_model.pick_time_s_sorted,
             name='pick_time_s_sorted',
             dtype=np.float64,
+        ),
+        'valid_pick_mask_sorted': _array_1d(
+            input_model.valid_pick_mask_sorted,
+            name='valid_pick_mask_sorted',
+            dtype=bool,
         ),
         'distance_m_sorted': _array_1d(
             input_model.distance_m_sorted,

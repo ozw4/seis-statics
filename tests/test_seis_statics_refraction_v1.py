@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from typing import Any
 
@@ -152,6 +153,30 @@ def test_v1_estimate_robust_to_outlier_picks() -> None:
 
     assert result.resolved_weathering_velocity_m_s == pytest.approx(800.0)
     assert np.min(result.group_n_used) < np.max(result.group_n_candidates)
+
+
+def test_v1_estimate_excludes_invalid_finite_picks() -> None:
+    model = _input_model(
+        pick_overrides={
+            (source_index, 5): 0.300
+            for source_index in range(3)
+        }
+    )
+    valid_pick_mask = model.valid_pick_mask_sorted.copy()
+    valid_pick_mask[np.arange(5, model.n_traces, 6)] = False
+    model = replace(model, valid_pick_mask_sorted=valid_pick_mask)
+
+    result = estimate_global_v1_from_direct_arrivals(
+        input_model=model,
+        first_layer=_first_layer(robust_enabled=False),
+    )
+
+    assert result.resolved_weathering_velocity_m_s == pytest.approx(
+        SYNTHETIC_V1_M_S,
+        abs=SYNTHETIC_V1_TOLERANCE_M_S,
+    )
+    assert result.qc['n_candidate_picks'] == 15
+    assert result.group_n_candidates.tolist() == [5, 5, 5]
 
 
 def test_v1_estimate_respects_direct_offset_gate() -> None:
