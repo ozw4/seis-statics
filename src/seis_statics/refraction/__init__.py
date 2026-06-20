@@ -6,6 +6,29 @@ from seis_statics.refraction.cell_velocity_status import (
     LOW_FOLD_CELL_REJECTION_REASON,
     LOW_FOLD_CELL_VELOCITY_STATUS,
 )
+from seis_statics.refraction.cell_coordinates import (
+    RefractionCellCoordinateMode,
+    RefractionCellProjectedPoints,
+    RefractionCellProjectedSourceReceiver,
+    effective_refraction_cell_grid_config,
+    project_refraction_cell_coordinates,
+    project_refraction_cell_points,
+    refraction_cell_coordinate_metadata,
+    refraction_cell_coordinate_metadata_from_config,
+)
+from seis_statics.refraction.cell_grid import (
+    RefractionCellAssignment,
+    RefractionCellGrid,
+    assign_observation_midpoint_cells,
+    assign_points_to_refraction_cells,
+    build_refraction_cell_grid,
+    compute_source_receiver_midpoints,
+)
+from seis_statics.refraction.cell_regularization import (
+    CellSlownessSmoothingRows,
+    augment_design_matrix_with_cell_smoothing,
+    build_cell_slowness_smoothing_rows,
+)
 from seis_statics.refraction.first_layer import (
     normalize_refraction_first_layer_request,
     resolve_weathering_velocity_m_s,
@@ -62,11 +85,17 @@ from seis_statics.refraction.types import (
 
 __all__ = [
     'BedrockVelocityMode',
+    'CellSlownessSmoothingRows',
     'LOCAL_V2_STATUS_VALUES',
     'LOW_FOLD_CELL_REJECTION_REASON',
     'LOW_FOLD_CELL_VELOCITY_STATUS',
     'REFRACTION_FIELD_CORRECTION_COMPONENT_NAMES',
     'REFRACTION_STATIC_STATUSES',
+    'RefractionCellAssignment',
+    'RefractionCellCoordinateMode',
+    'RefractionCellGrid',
+    'RefractionCellProjectedPoints',
+    'RefractionCellProjectedSourceReceiver',
     'RefractionEndpointTable',
     'RefractionFieldCorrectionComponentName',
     'RefractionFirstLayerMode',
@@ -102,8 +131,19 @@ __all__ = [
     'RefractionStaticSolverOptions',
     'RefractionUpholeStatus',
     'ResolvedRefractionFirstLayer',
+    'assign_observation_midpoint_cells',
+    'assign_points_to_refraction_cells',
+    'augment_design_matrix_with_cell_smoothing',
+    'build_cell_slowness_smoothing_rows',
+    'build_refraction_cell_grid',
     'classify_refraction_endpoint_static_status',
+    'compute_source_receiver_midpoints',
+    'effective_refraction_cell_grid_config',
     'normalize_refraction_first_layer_request',
+    'project_refraction_cell_coordinates',
+    'project_refraction_cell_points',
+    'refraction_cell_coordinate_metadata',
+    'refraction_cell_coordinate_metadata_from_config',
     'resolve_weathering_velocity_m_s',
     'resolved_first_layer_weathering_velocity_m_s',
     'validate_resolved_first_layer_velocity_match',
