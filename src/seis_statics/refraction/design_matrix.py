@@ -340,13 +340,32 @@ def build_refraction_static_design_matrix_from_arrays(
         pick_time_s_sorted,
         name='pick_time_s_sorted',
     )
-    trace_count = _validate_n_traces(n_traces, default=int(pick_time.shape[0]))
-    expected_shape = (trace_count,)
-    if pick_time.shape != expected_shape:
+    input_trace_count = int(pick_time.shape[0])
+    if input_trace_count <= 0:
         raise RefractionStaticDesignMatrixError(
-            'pick_time_s_sorted shape mismatch: '
-            f'expected {expected_shape}, got {pick_time.shape}'
+            'pick_time_s_sorted must contain at least one trace'
         )
+    expected_shape = (input_trace_count,)
+    trace_index_sorted = (
+        np.arange(input_trace_count, dtype=np.int64)
+        if sorted_trace_index is None
+        else _coerce_1d_integer_int64(
+            sorted_trace_index,
+            name='sorted_trace_index',
+            expected_shape=expected_shape,
+        )
+    )
+    trace_count = _validate_n_traces(
+        n_traces,
+        default=_default_n_traces(
+            input_trace_count=input_trace_count,
+            sorted_trace_index=trace_index_sorted,
+        ),
+    )
+    _validate_sorted_trace_index_range(
+        trace_index_sorted,
+        n_traces=trace_count,
+    )
     valid_mask = _coerce_1d_bool_array(
         valid_observation_mask_sorted,
         name='valid_observation_mask_sorted',
@@ -384,15 +403,6 @@ def build_refraction_static_design_matrix_from_arrays(
         receiver_endpoint_key_sorted,
         name='receiver_endpoint_key_sorted',
         expected_shape=expected_shape,
-    )
-    trace_index_sorted = (
-        np.arange(trace_count, dtype=np.int64)
-        if sorted_trace_index is None
-        else _coerce_1d_integer_int64(
-            sorted_trace_index,
-            name='sorted_trace_index',
-            expected_shape=expected_shape,
-        )
     )
 
     selected_mask = valid_mask
@@ -1980,6 +1990,30 @@ def _validate_n_traces(value: int | None, *, default: int) -> int:
             'input_model.n_traces must be greater than 0'
         )
     return out
+
+
+def _default_n_traces(
+    *,
+    input_trace_count: int,
+    sorted_trace_index: np.ndarray,
+) -> int:
+    if sorted_trace_index.size == 0:
+        return int(input_trace_count)
+    return max(int(input_trace_count), int(np.max(sorted_trace_index)) + 1)
+
+
+def _validate_sorted_trace_index_range(
+    values: np.ndarray,
+    *,
+    n_traces: int,
+) -> None:
+    invalid_mask = (values < 0) | (values >= n_traces)
+    if np.any(invalid_mask):
+        invalid = int(values[np.flatnonzero(invalid_mask)[0]])
+        raise RefractionStaticDesignMatrixError(
+            'sorted_trace_index values must be in [0, n_traces); '
+            f'got {invalid} with n_traces={n_traces}'
+        )
 
 
 def _coerce_unique_node_id(values: np.ndarray) -> np.ndarray:

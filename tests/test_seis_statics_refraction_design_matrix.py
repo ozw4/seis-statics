@@ -60,6 +60,25 @@ def test_refraction_design_matrix_row_map_uses_sorted_trace_index_values() -> No
     np.testing.assert_array_equal(design.row_trace_index_sorted, [41, 99])
     np.testing.assert_allclose(design.observed_pick_time_s, [0.20, 0.30])
     np.testing.assert_allclose(design.row_distance_m, [500.0, 700.0])
+    assert design.qc['n_traces'] == 100
+
+
+def test_refraction_design_matrix_rejects_trace_index_outside_n_traces() -> None:
+    with pytest.raises(
+        RefractionStaticDesignMatrixError,
+        match=r'sorted_trace_index values must be in \[0, n_traces\)',
+    ):
+        build_refraction_static_design_matrix_from_arrays(
+            pick_time_s_sorted=np.asarray([0.20, 0.25]),
+            valid_observation_mask_sorted=np.asarray([True, True]),
+            source_node_id_sorted=np.asarray([10, 10]),
+            receiver_node_id_sorted=np.asarray([20, 20]),
+            distance_m_sorted=np.asarray([500.0, 600.0]),
+            node_id=np.asarray([10, 20]),
+            sorted_trace_index=np.asarray([0, 5]),
+            bedrock_velocity_mode='solve_global',
+            n_traces=5,
+        )
 
 
 def test_refraction_design_matrix_fixed_global_moves_distance_term_to_rhs() -> None:

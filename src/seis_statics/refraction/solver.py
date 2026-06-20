@@ -364,12 +364,20 @@ def solve_refraction_static_design_least_squares(
         parameter_vector=parameter_vector,
         active_mask=raw.active_mask,
     )
+    node_observation_count = _node_observation_count_for_row_mask(
+        design,
+        row_used_mask=row_used_mask,
+    )
+    cell_observation_count = _cell_observation_count_for_row_mask(
+        design,
+        row_used_mask=row_used_mask,
+    )
     (
         cell_id,
         cell_slowness,
         cell_velocity,
         cell_status,
-        cell_observation_count,
+        cell_result_observation_count,
         row_midpoint_cell_id,
         row_midpoint_slowness,
         row_midpoint_velocity,
@@ -377,6 +385,7 @@ def solve_refraction_static_design_least_squares(
         design,
         parameter_vector=parameter_vector,
         active_mask=raw.active_mask,
+        cell_observation_count=cell_observation_count,
     )
     rms_s = _rms(row_residual[row_used_mask])
     qc = _build_solver_qc(
@@ -390,6 +399,8 @@ def solve_refraction_static_design_least_squares(
         node_solution_status=node_status,
         cell_velocity_status=cell_status,
         robust_result=robust_result,
+        node_observation_count=node_observation_count,
+        cell_observation_count=cell_observation_count,
     )
 
     return RefractionStaticSolveResult(
@@ -397,10 +408,7 @@ def solve_refraction_static_design_least_squares(
         node_id=node_id,
         node_half_intercept_time_s=node_t1,
         node_solution_status=node_status,
-        node_observation_count=np.ascontiguousarray(
-            design.node_observation_count,
-            dtype=np.int64,
-        ),
+        node_observation_count=node_observation_count,
         bedrock_velocity_mode=design.bedrock_velocity_mode,
         bedrock_velocity_m_s=bedrock_velocity,
         bedrock_slowness_s_per_m=bedrock_slowness,
@@ -409,7 +417,7 @@ def solve_refraction_static_design_least_squares(
         cell_bedrock_slowness_s_per_m=cell_slowness,
         cell_bedrock_velocity_m_s=cell_velocity,
         cell_velocity_status=cell_status,
-        cell_observation_count=cell_observation_count,
+        cell_observation_count=cell_result_observation_count,
         row_midpoint_cell_id=row_midpoint_cell_id,
         row_midpoint_bedrock_slowness_s_per_m=row_midpoint_slowness,
         row_midpoint_bedrock_velocity_m_s=row_midpoint_velocity,
@@ -539,6 +547,27 @@ def _validate_design(design: RefractionStaticDesignMatrix) -> None:
         raise RefractionStaticSolverError('design.matrix must be CSR')
     _validate_finite(design.matrix.data, name='design.matrix.data')
     _validate_finite(design.rhs_s, name='design.rhs_s')
+    if design.row_trace_index_sorted.shape != (design.n_observations,):
+        raise RefractionStaticSolverError('design.row_trace_index_sorted shape mismatch')
+    try:
+        n_traces = int(design.qc['n_traces'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RefractionStaticSolverError(
+            'design.qc["n_traces"] must be an integer'
+        ) from exc
+    if n_traces <= 0:
+        raise RefractionStaticSolverError(
+            'design.qc["n_traces"] must be greater than 0'
+        )
+    invalid_trace_mask = (design.row_trace_index_sorted < 0) | (
+        design.row_trace_index_sorted >= n_traces
+    )
+    if np.any(invalid_trace_mask):
+        invalid = int(design.row_trace_index_sorted[np.flatnonzero(invalid_trace_mask)[0]])
+        raise RefractionStaticSolverError(
+            'design.row_trace_index_sorted values must be in [0, n_traces); '
+            f'got {invalid} with n_traces={n_traces}'
+        )
 
 
 def _validate_model_for_design(
@@ -1261,11 +1290,118 @@ def _bedrock_solution(
     return slowness, velocity, status
 
 
+def _node_observation_count_for_row_mask(
+    design: RefractionStaticDesignMatrix,
+    *,
+    row_used_mask: np.ndarray,
+) -> np.ndarray:
+    mask = _coerce_design_row_mask(design, row_used_mask=row_used_mask)
+    node_id = np.ascontiguousarray(design.diagnostics_context.node_id, dtype=np.int64)
+    if node_id.size == 0:
+        return np.empty(0, dtype=np.int64)
+    row_index = np.flatnonzero(mask).astype(np.int64, copy=False)
+    if row_index.size == 0:
+        return np.zeros(node_id.shape, dtype=np.int64)
+
+    node_position_by_id = {
+        int(raw_node_id): idx for idx, raw_node_id in enumerate(node_id.tolist())
+    }
+    source_pos = np.asarray(
+        [
+            node_position_by_id.get(int(raw_node_id), -1)
+            for raw_node_id in design.row_source_node_id.tolist()
+        ],
+        dtype=np.int64,
+    )
+    receiver_pos = np.asarray(
+        [
+            node_position_by_id.get(int(raw_node_id), -1)
+            for raw_node_id in design.row_receiver_node_id.tolist()
+        ],
+        dtype=np.int64,
+    )
+    selected_source_pos = source_pos[row_index]
+    selected_receiver_pos = receiver_pos[row_index]
+    valid_source = selected_source_pos >= 0
+    valid_receiver = selected_receiver_pos >= 0
+    node_pos = np.concatenate(
+        (
+            selected_source_pos[valid_source],
+            selected_receiver_pos[valid_receiver],
+        )
+    )
+    count_row_index = np.concatenate(
+        (
+            row_index[valid_source],
+            row_index[valid_receiver],
+        )
+    )
+    if node_pos.size == 0:
+        return np.zeros(node_id.shape, dtype=np.int64)
+
+    unique_pair_key = np.unique(node_pos * int(design.n_observations) + count_row_index)
+    unique_node_pos = unique_pair_key // int(design.n_observations)
+    return np.ascontiguousarray(
+        np.bincount(unique_node_pos, minlength=int(node_id.shape[0])).astype(
+            np.int64,
+            copy=False,
+        ),
+        dtype=np.int64,
+    )
+
+
+def _cell_observation_count_for_row_mask(
+    design: RefractionStaticDesignMatrix,
+    *,
+    row_used_mask: np.ndarray,
+) -> np.ndarray:
+    if design.bedrock_velocity_mode != 'solve_cell':
+        return np.empty(0, dtype=np.int64)
+    _validate_cell_design(design)
+    if design.n_total_cells is None or design.active_cell_id is None:
+        raise RefractionStaticSolverError('solve_cell design requires cell metadata')
+    if design.row_midpoint_cell_id is None:
+        raise RefractionStaticSolverError('solve_cell design requires row cell IDs')
+
+    mask = _coerce_design_row_mask(design, row_used_mask=row_used_mask)
+    base_counts = np.asarray(
+        design.qc.get(
+            'cell_observation_count',
+            np.zeros(design.n_total_cells, dtype=np.int64),
+        ),
+        dtype=np.int64,
+    )
+    if base_counts.shape != (design.n_total_cells,):
+        raise RefractionStaticSolverError('cell_observation_count shape mismatch')
+    counts = np.ascontiguousarray(base_counts.copy(), dtype=np.int64)
+    used_cell_id = design.row_midpoint_cell_id[mask]
+    active_counts = np.bincount(
+        used_cell_id,
+        minlength=int(design.n_total_cells),
+    ).astype(np.int64, copy=False)
+    counts[design.active_cell_id] = active_counts[design.active_cell_id]
+    return counts
+
+
+def _coerce_design_row_mask(
+    design: RefractionStaticDesignMatrix,
+    *,
+    row_used_mask: np.ndarray,
+) -> np.ndarray:
+    mask = np.asarray(row_used_mask)
+    if mask.shape != (design.n_observations,):
+        raise RefractionStaticSolverError('row_used_mask shape mismatch')
+    if not np.issubdtype(mask.dtype, np.bool_):
+        raise RefractionStaticSolverError('row_used_mask must have bool dtype')
+    return np.ascontiguousarray(mask, dtype=bool)
+
+
 def _cell_solution(
     design: RefractionStaticDesignMatrix,
     *,
     parameter_vector: np.ndarray,
     active_mask: np.ndarray,
+    cell_observation_count: np.ndarray,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -1346,13 +1482,7 @@ def _cell_solution(
     _validate_finite(row_midpoint_slowness, name='row_midpoint_bedrock_slowness')
     _validate_finite(row_midpoint_velocity, name='row_midpoint_bedrock_velocity')
 
-    cell_observation_count = np.asarray(
-        design.qc.get(
-            'cell_observation_count',
-            np.zeros(cell_id.shape, dtype=np.int64),
-        ),
-        dtype=np.int64,
-    )
+    cell_observation_count = np.asarray(cell_observation_count, dtype=np.int64)
     if cell_observation_count.shape != cell_id.shape:
         raise RefractionStaticSolverError('cell_observation_count shape mismatch')
     return (
@@ -1435,11 +1565,19 @@ def _build_solver_qc(
     node_solution_status: np.ndarray,
     cell_velocity_status: np.ndarray,
     robust_result: _RefractionStaticRobustRunResult,
+    node_observation_count: np.ndarray,
+    cell_observation_count: np.ndarray,
 ) -> dict[str, Any]:
     unique_status, status_counts = np.unique(node_solution_status, return_counts=True)
     unique_cell_status, cell_status_counts = np.unique(
         cell_velocity_status,
         return_counts=True,
+    )
+    design_qc = _solver_design_qc(
+        design,
+        node_observation_count=node_observation_count,
+        cell_observation_count=cell_observation_count,
+        row_used_mask=robust_result.row_used_mask,
     )
     qc = {
         'method': 'gli_variable_thickness',
@@ -1498,7 +1636,7 @@ def _build_solver_qc(
                 strict=True,
             )
         },
-        'design_matrix': dict(design.qc),
+        'design_matrix': design_qc,
     }
     if system.smoothing_rows is not None:
         qc['cell_smoothing'] = dict(system.smoothing_rows.qc)
@@ -1511,6 +1649,38 @@ def _build_solver_qc(
                 strict=True,
             )
         }
+    return qc
+
+
+def _solver_design_qc(
+    design: RefractionStaticDesignMatrix,
+    *,
+    node_observation_count: np.ndarray,
+    cell_observation_count: np.ndarray,
+    row_used_mask: np.ndarray,
+) -> dict[str, Any]:
+    qc = dict(design.qc)
+    qc['node_observation_count'] = [
+        int(value) for value in node_observation_count.tolist()
+    ]
+    if design.bedrock_velocity_mode != 'solve_cell':
+        return qc
+    _validate_cell_design(design)
+    if design.active_cell_id is None:
+        raise RefractionStaticSolverError('solve_cell design requires active cells')
+    qc['cell_observation_count'] = [
+        int(value) for value in cell_observation_count.tolist()
+    ]
+    qc['n_observations_used'] = int(np.count_nonzero(row_used_mask))
+    active_counts = cell_observation_count[design.active_cell_id]
+    if active_counts.size:
+        qc['min_observations_per_active_cell'] = int(np.min(active_counts))
+        qc['median_observations_per_active_cell'] = float(np.median(active_counts))
+        qc['max_observations_per_active_cell'] = int(np.max(active_counts))
+    else:
+        qc['min_observations_per_active_cell'] = None
+        qc['median_observations_per_active_cell'] = None
+        qc['max_observations_per_active_cell'] = None
     return qc
 
 

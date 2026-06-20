@@ -149,6 +149,32 @@ def test_refraction_solver_fixed_global_uses_fixed_velocity_distance_term() -> N
     np.testing.assert_allclose(result.row_residual_s, 0.0, atol=1.0e-10)
 
 
+def test_refraction_solver_sparse_trace_index_infers_full_output_length() -> None:
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=np.asarray([0.26, 0.30]),
+        valid_observation_mask_sorted=np.asarray([True, True]),
+        source_node_id_sorted=np.asarray([10, 10]),
+        receiver_node_id_sorted=np.asarray([10, 10]),
+        distance_m_sorted=np.asarray([500.0, 600.0]),
+        node_id=np.asarray([10]),
+        sorted_trace_index=np.asarray([41, 99]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(),
+    )
+
+    assert result.modeled_pick_time_s_sorted.shape == (100,)
+    assert result.used_observation_mask_sorted.shape == (100,)
+    np.testing.assert_array_equal(np.flatnonzero(result.used_observation_mask_sorted), [41, 99])
+    np.testing.assert_allclose(result.modeled_pick_time_s_sorted[[41, 99]], [0.26, 0.30])
+    np.testing.assert_allclose(result.node_half_intercept_time_s, [0.03], atol=1.0e-10)
+
+
 def test_refraction_solver_marks_global_velocity_bound_status() -> None:
     source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
         _known_global_arrays()
@@ -232,6 +258,8 @@ def test_refraction_solver_robust_global_rejects_outlier_and_recovers_solution()
     assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 1
     assert result.qc['robust_iteration_count'] == 2
     assert result.qc['n_final_used_observations'] == 5
+    np.testing.assert_array_equal(result.node_observation_count, [3, 2, 3, 2])
+    assert result.qc['design_matrix']['node_observation_count'] == [3, 2, 3, 2]
     assert result.bedrock_velocity_m_s == pytest.approx(2500.0, abs=1.0e-6)
     np.testing.assert_allclose(
         result.node_half_intercept_time_s,

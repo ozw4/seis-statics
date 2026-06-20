@@ -138,4 +138,8 @@ def test_refraction_cell_robust_synthetic_rejects_outlier_and_preserves_cells() 
     assert result.qc['bedrock_velocity_status'] == 'cell'
     assert result.qc['n_final_used_observations'] == 5
     assert result.qc['robust_iterations'][0]['n_rejected_this_iteration'] == 1
+    np.testing.assert_array_equal(result.cell_observation_count, [3, 2])
+    assert result.qc['design_matrix']['cell_observation_count'] == [3, 2]
+    assert result.qc['design_matrix']['min_observations_per_active_cell'] == 2
+    assert result.qc['design_matrix']['n_observations_used'] == 5
     assert result.rms_residual_s == pytest.approx(0.0, abs=1.0e-8)
