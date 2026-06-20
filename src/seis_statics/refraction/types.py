@@ -141,6 +141,19 @@ class RefractionEndpointFieldCorrectionResult:
 
 
 @dataclass(frozen=True)
+class RefractionTraceFieldCorrectionResult:
+    """Trace-order field static composition result."""
+
+    source_endpoint_key_sorted: np.ndarray
+    receiver_endpoint_key_sorted: np.ndarray
+    source_field_shift_s_sorted: np.ndarray
+    receiver_field_shift_s_sorted: np.ndarray
+    trace_field_shift_s_sorted: np.ndarray
+    trace_field_static_status_sorted: np.ndarray
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class RefractionStaticInputModel:
     file_id: str
     n_traces: int
@@ -200,6 +213,7 @@ __all__ = [
     'RefractionSourceDepthMode',
     'RefractionSourceDepthStatus',
     'RefractionStaticInputModel',
+    'RefractionTraceFieldCorrectionResult',
     'RefractionUpholeResult',
     'RefractionUpholeStatus',
     'ResolvedRefractionFirstLayer',
