@@ -160,6 +160,18 @@ _DESIGN_MATRIX_EXPORTS = frozenset(
         'summarize_refraction_static_design_matrix',
     }
 )
+_SOLVER_EXPORTS = frozenset(
+    {
+        'RefractionStaticSolveResult',
+        'RefractionStaticSolveSystem',
+        'RefractionStaticSolverError',
+        'build_refraction_static_solver_system',
+        'solve_refraction_static_design_least_squares',
+        'solve_refraction_static_least_squares',
+        'summarize_refraction_static_solve_result',
+        'validate_refraction_static_solver_options',
+    }
+)
 
 
 def __getattr__(name: str) -> object:
@@ -167,6 +179,12 @@ def __getattr__(name: str) -> object:
         from seis_statics.refraction import design_matrix
 
         value = getattr(design_matrix, name)
+        globals()[name] = value
+        return value
+    if name in _SOLVER_EXPORTS:
+        from seis_statics.refraction import solver
+
+        value = getattr(solver, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
@@ -240,7 +258,10 @@ __all__ = [
     'RefractionStaticRefractorCellOutsideGridPolicy',
     'RefractionStaticRobustMethod',
     'RefractionStaticRobustOptions',
+    'RefractionStaticSolveResult',
+    'RefractionStaticSolveSystem',
     'RefractionStaticSolverOptions',
+    'RefractionStaticSolverError',
     'RefractionT1LSST1LayerEndpointComponents',
     'RefractionT1LSST2LayerThicknessResult',
     'RefractionT1LSST3LayerThicknessResult',
@@ -257,6 +278,7 @@ __all__ = [
     'build_refraction_static_cell_design_matrix',
     'build_refraction_static_design_matrix',
     'build_refraction_static_design_matrix_from_arrays',
+    'build_refraction_static_solver_system',
     'classify_refraction_endpoint_static_status',
     'compose_t1lsst_1layer_endpoint_component_rows',
     'compose_refraction_endpoint_field_corrections',
@@ -294,6 +316,10 @@ __all__ = [
     'resolve_refraction_uphole',
     'resolve_refraction_uphole_for_input_model',
     'resolved_first_layer_weathering_velocity_m_s',
+    'solve_refraction_static_design_least_squares',
+    'solve_refraction_static_least_squares',
     'summarize_refraction_static_design_matrix',
+    'summarize_refraction_static_solve_result',
+    'validate_refraction_static_solver_options',
     'validate_resolved_first_layer_velocity_match',
 ]
