@@ -32,6 +32,21 @@ If using the package from another local repository:
 python -m pip install -e ../seis-statics
 ```
 
+For migration work, keep sibling checkouts separate:
+
+```text
+workspaces/
+  seis-statics/
+  seisviewer2d/
+```
+
+`seisviewer2d` may depend on this package during integration, but runtime and
+test dependencies must remain one-way: `seisviewer2d -> seis_statics`.
+Sibling checkout or bind-mount access to `seisviewer2d` is for read-only
+reference and regression comparison only. Package code, normal tests, and
+fixtures in this repository must be standalone and must not import from,
+symlink to, or add `seisviewer2d`/`app` paths at runtime.
+
 ## Main APIs
 
 ### Source/receiver residual statics from lag observations
@@ -121,6 +136,23 @@ where:
 result.applied_shift_s = -result.trace_delay_s
 ```
 
+For time-term inversion, `trace_time_term_delay_s_sorted > 0` likewise means
+the event is late. The weathering correction applied to the trace is:
+
+```text
+applied_weathering_shift_s_sorted = -trace_time_term_delay_s_sorted
+```
+
+The final trace shift is the sum of already-applied datum and residual shifts
+plus the time-term weathering shift:
+
+```text
+final_applied_shift_s_sorted =
+    datum_applied_shift_s_sorted
+    + residual_applied_shift_s_sorted
+    + applied_weathering_shift_s_sorted
+```
+
 ## Invalid traces and zero weights
 
 `valid_mask=False` means the trace is not used as a valid lag observation. For such traces, the source/receiver delay prediction is not evaluated, and the result values are `NaN`:
@@ -192,13 +224,13 @@ If using a `src` layout before installation:
 PYTHONPATH="$PWD/src" python -m pytest -q tests
 ```
 
-Check that the package does not depend on `seisviewer2d` application code:
+Check that the package does not depend on application code or application-only
+dependencies:
 
 ```bash
-grep -R "from app\|import app\|seisviewer2d" src tests || true
+python -m pytest -q tests/test_seis_statics_no_app_dependency.py
+python -m pytest -q tests/test_seis_statics_package_import.py
 ```
-
-This command should produce no output.
 
 ## Dependencies
 
