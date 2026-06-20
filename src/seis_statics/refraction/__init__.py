@@ -162,6 +162,8 @@ _DESIGN_MATRIX_EXPORTS = frozenset(
 )
 _SOLVER_EXPORTS = frozenset(
     {
+        'RefractionStaticRobustIterationSummary',
+        'RefractionStaticRobustStopReason',
         'RefractionStaticSolveResult',
         'RefractionStaticSolveSystem',
         'RefractionStaticSolverError',
@@ -256,8 +258,10 @@ __all__ = [
     'RefractionStaticRefractorCellCoordinateMode',
     'RefractionStaticRefractorCellOptions',
     'RefractionStaticRefractorCellOutsideGridPolicy',
+    'RefractionStaticRobustIterationSummary',
     'RefractionStaticRobustMethod',
     'RefractionStaticRobustOptions',
+    'RefractionStaticRobustStopReason',
     'RefractionStaticSolveResult',
     'RefractionStaticSolveSystem',
     'RefractionStaticSolverOptions',

@@ -179,10 +179,13 @@ def test_refraction_solver_marks_global_velocity_bound_status() -> None:
     assert result.bedrock_velocity_status == 'clipped_upper'
 
 
-def test_refraction_solver_rejects_robust_and_mismatched_design_model_modes() -> None:
+def test_refraction_solver_robust_global_rejects_outlier_and_recovers_solution() -> None:
     source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
         _known_global_arrays()
     )
+    valid_mask = np.ones(valid_mask.shape, dtype=bool)
+    pick_time = pick_time.copy()
+    pick_time[5] += 0.12
     design = build_refraction_static_design_matrix_from_arrays(
         pick_time_s_sorted=pick_time,
         valid_observation_mask_sorted=valid_mask,
@@ -194,12 +197,143 @@ def test_refraction_solver_rejects_robust_and_mismatched_design_model_modes() ->
         n_traces=6,
     )
 
-    with pytest.raises(RefractionStaticSolverError, match='robust'):
-        solve_refraction_static_design_least_squares(
-            design,
-            model=_model(mode='solve_global'),
-            solver_options=RefractionStaticSolverOptions(),
-        )
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=2.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            )
+        ),
+    )
+
+    assert result.robust_enabled is True
+    assert result.robust_stop_reason == 'converged'
+    assert result.n_rejected_observations == 1
+    np.testing.assert_array_equal(
+        result.rejected_observation_mask_sorted,
+        [False, False, False, False, False, True],
+    )
+    np.testing.assert_array_equal(
+        result.used_observation_mask_sorted,
+        [True, True, True, True, True, False],
+    )
+    np.testing.assert_array_equal(
+        result.rejected_iteration_sorted,
+        [-1, -1, -1, -1, -1, 0],
+    )
+    assert len(result.robust_iteration_summaries) == 2
+    assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 1
+    assert result.qc['robust_iteration_count'] == 2
+    assert result.qc['n_final_used_observations'] == 5
+    assert result.bedrock_velocity_m_s == pytest.approx(2500.0, abs=1.0e-6)
+    np.testing.assert_allclose(
+        result.node_half_intercept_time_s,
+        [0.03, 0.05, 0.035, 0.045],
+        atol=1.0e-10,
+    )
+    np.testing.assert_allclose(result.row_residual_s[:5], 0.0, atol=1.0e-10)
+
+
+def test_refraction_solver_robust_fixed_global_recovers_solution() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    valid_mask = np.ones(valid_mask.shape, dtype=bool)
+    pick_time = pick_time.copy()
+    pick_time[5] += 0.12
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=2.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            )
+        ),
+    )
+
+    assert result.robust_stop_reason == 'converged'
+    assert result.n_rejected_observations >= 1
+    assert result.rejected_observation_mask_sorted[5]
+    np.testing.assert_allclose(
+        result.node_half_intercept_time_s,
+        [0.03, 0.05, 0.035, 0.045],
+        atol=1.0e-10,
+    )
+    np.testing.assert_allclose(
+        result.row_residual_s[result.used_observation_mask_sorted],
+        0.0,
+        atol=1.0e-10,
+    )
+
+
+def test_refraction_solver_robust_safe_rejection_preserves_used_floor() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    valid_mask = np.ones(valid_mask.shape, dtype=bool)
+    pick_time = pick_time.copy()
+    pick_time[5] += 0.12
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='solve_global',
+        n_traces=6,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=2.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=1.0,
+                min_used_observations=1,
+            )
+        ),
+    )
+
+    assert result.robust_stop_reason == 'safe_rejection'
+    assert result.n_rejected_observations == 0
+    np.testing.assert_array_equal(result.used_observation_mask_sorted, valid_mask)
+
+
+def test_refraction_solver_rejects_mismatched_design_model_modes() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
 
     cell_design = build_refraction_static_design_matrix_from_arrays(
         pick_time_s_sorted=pick_time,

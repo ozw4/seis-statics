@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from scipy import optimize, sparse
@@ -74,9 +74,39 @@ class RefractionStaticSolveSystem:
     smoothing_rows: CellSlownessSmoothingRows | None
 
 
+RefractionStaticRobustStopReason = Literal[
+    'disabled',
+    'converged',
+    'max_iterations',
+    'zero_scale',
+    'safe_rejection',
+]
+
+
+@dataclass(frozen=True)
+class RefractionStaticRobustIterationSummary:
+    """Numerical summary for one robust refraction rejection pass."""
+
+    iteration_index: int
+    method: str
+
+    n_used_before: int
+    n_rejected_this_iteration: int
+    n_used_after: int
+
+    residual_center_s: float
+    residual_scale_s: float
+    residual_scale_floor_s: float
+    residual_cutoff_s: float
+    max_abs_centered_residual_s: float
+
+    converged: bool
+    stop_reason: RefractionStaticRobustStopReason | None
+
+
 @dataclass(frozen=True)
 class RefractionStaticSolveResult:
-    """Non-robust GLI refraction static solution."""
+    """GLI refraction static solution."""
 
     parameter_vector: np.ndarray
 
@@ -105,6 +135,8 @@ class RefractionStaticSolveResult:
     residual_s_sorted: np.ndarray
     residual_ms_sorted: np.ndarray
     used_observation_mask_sorted: np.ndarray
+    rejected_observation_mask_sorted: np.ndarray
+    rejected_iteration_sorted: np.ndarray
 
     row_modeled_pick_time_s: np.ndarray
     row_residual_s: np.ndarray
@@ -119,10 +151,27 @@ class RefractionStaticSolveResult:
     solver_iterations: int
     solver_active_mask: np.ndarray
 
+    robust_enabled: bool
+    robust_stop_reason: RefractionStaticRobustStopReason
+    robust_iteration_summaries: tuple[RefractionStaticRobustIterationSummary, ...]
+    n_initial_used_observations: int
+    n_final_used_observations: int
+    n_rejected_observations: int
+
     design: RefractionStaticDesignMatrix
     system: RefractionStaticSolveSystem
     solver_options: RefractionStaticSolverOptions
     qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _RefractionStaticRobustRunResult:
+    raw_result: optimize.OptimizeResult
+    system: RefractionStaticSolveSystem
+    row_used_mask: np.ndarray
+    rejected_iteration_sorted: np.ndarray
+    iteration_summaries: tuple[RefractionStaticRobustIterationSummary, ...]
+    stop_reason: RefractionStaticRobustStopReason
 
 
 def build_refraction_static_solver_system(
@@ -264,14 +313,22 @@ def solve_refraction_static_design_least_squares(
     model: Any,
     solver_options: RefractionStaticSolverOptions | None = None,
 ) -> RefractionStaticSolveResult:
-    """Solve a pre-built non-robust refraction design matrix."""
+    """Solve a pre-built refraction design matrix."""
     options = validate_refraction_static_solver_options(solver_options)
     system = build_refraction_static_solver_system(
         design,
         model=model,
         solver_options=options,
     )
-    raw = _run_lsq_linear(system)
+    robust_result = _run_refraction_static_solver(
+        design=design,
+        system=system,
+        model=model,
+        solver_options=options,
+    )
+    raw = robust_result.raw_result
+    final_system = robust_result.system
+    row_used_mask = robust_result.row_used_mask
     parameter_vector = np.ascontiguousarray(raw.x, dtype=np.float64)
     _validate_finite(parameter_vector, name='parameter_vector')
 
@@ -291,13 +348,16 @@ def solve_refraction_static_design_least_squares(
     full_modeled[design.row_trace_index_sorted] = row_modeled
     full_residual[design.row_trace_index_sorted] = row_residual
     used_mask = np.zeros(design.qc['n_traces'], dtype=bool)
-    used_mask[design.row_trace_index_sorted] = True
+    used_mask[design.row_trace_index_sorted[row_used_mask]] = True
+    initial_used_mask = np.zeros(design.qc['n_traces'], dtype=bool)
+    initial_used_mask[design.row_trace_index_sorted] = True
+    rejected_mask = np.ascontiguousarray(initial_used_mask & ~used_mask, dtype=bool)
 
     node_id, node_t1, node_status = _assemble_node_solution(
         design,
         parameter_vector=parameter_vector,
         active_mask=raw.active_mask,
-        system=system,
+        system=final_system,
     )
     bedrock_slowness, bedrock_velocity, bedrock_status = _bedrock_solution(
         design,
@@ -318,10 +378,10 @@ def solve_refraction_static_design_least_squares(
         parameter_vector=parameter_vector,
         active_mask=raw.active_mask,
     )
-    rms_s = _rms(row_residual)
+    rms_s = _rms(row_residual[row_used_mask])
     qc = _build_solver_qc(
         design=design,
-        system=system,
+        system=final_system,
         result=raw,
         rms_residual_s=rms_s,
         bedrock_velocity_m_s=bedrock_velocity,
@@ -329,6 +389,7 @@ def solve_refraction_static_design_least_squares(
         bedrock_velocity_status=bedrock_status,
         node_solution_status=node_status,
         cell_velocity_status=cell_status,
+        robust_result=robust_result,
     )
 
     return RefractionStaticSolveResult(
@@ -358,6 +419,8 @@ def solve_refraction_static_design_least_squares(
         residual_s_sorted=full_residual,
         residual_ms_sorted=np.ascontiguousarray(full_residual * 1000.0),
         used_observation_mask_sorted=used_mask,
+        rejected_observation_mask_sorted=rejected_mask,
+        rejected_iteration_sorted=robust_result.rejected_iteration_sorted,
         row_modeled_pick_time_s=row_modeled,
         row_residual_s=row_residual,
         rms_residual_s=rms_s,
@@ -369,8 +432,14 @@ def solve_refraction_static_design_least_squares(
         solver_optimality=float(raw.optimality),
         solver_iterations=int(raw.nit),
         solver_active_mask=np.ascontiguousarray(raw.active_mask, dtype=np.int64),
+        robust_enabled=bool(options.robust.enabled),
+        robust_stop_reason=robust_result.stop_reason,
+        robust_iteration_summaries=robust_result.iteration_summaries,
+        n_initial_used_observations=int(design.n_observations),
+        n_final_used_observations=int(np.count_nonzero(row_used_mask)),
+        n_rejected_observations=int(np.count_nonzero(rejected_mask)),
         design=design,
-        system=system,
+        system=final_system,
         solver_options=options,
         qc=qc,
     )
@@ -397,10 +466,38 @@ def validate_refraction_static_solver_options(
         raise RefractionStaticSolverError(
             'solver.robust must be a RefractionStaticRobustOptions instance'
         )
-    if robust.enabled:
+    robust_options = RefractionStaticRobustOptions(
+        enabled=bool(robust.enabled),
+        method=_validate_robust_method(robust.method),
+        threshold=_coerce_positive_finite_float(
+            robust.threshold,
+            name='solver.robust.threshold',
+            error_type=RefractionStaticSolverError,
+        ),
+        scale_floor_ms=_coerce_nonnegative_finite_float(
+            robust.scale_floor_ms,
+            name='solver.robust.scale_floor_ms',
+            error_type=RefractionStaticSolverError,
+        ),
+        max_iterations=_coerce_positive_int(
+            robust.max_iterations,
+            name='solver.robust.max_iterations',
+            error_type=RefractionStaticSolverError,
+        ),
+        min_used_fraction=_coerce_positive_finite_float(
+            robust.min_used_fraction,
+            name='solver.robust.min_used_fraction',
+            error_type=RefractionStaticSolverError,
+        ),
+        min_used_observations=_coerce_positive_int(
+            robust.min_used_observations,
+            name='solver.robust.min_used_observations',
+            error_type=RefractionStaticSolverError,
+        ),
+    )
+    if robust_options.min_used_fraction > 1.0:
         raise RefractionStaticSolverError(
-            'robust refraction solving is not supported in this issue; set '
-            'solver.robust.enabled=False'
+            'solver.robust.min_used_fraction must be <= 1'
         )
     return RefractionStaticSolverOptions(
         damping=_coerce_nonnegative_finite_float(
@@ -418,7 +515,7 @@ def validate_refraction_static_solver_options(
             name='solver.max_abs_half_intercept_time_ms',
             error_type=RefractionStaticSolverError,
         ),
-        robust=robust,
+        robust=robust_options,
     )
 
 
@@ -656,6 +753,398 @@ def _node_role_counts(
     values = _coerce_1d_integer_int64(node_ids, name='node_ids')
     cols = np.asarray([node_id_to_col[int(value)] for value in values], dtype=np.int64)
     return np.bincount(cols, minlength=n_active_nodes).astype(np.int64, copy=False)
+
+
+def _run_refraction_static_solver(
+    *,
+    design: RefractionStaticDesignMatrix,
+    system: RefractionStaticSolveSystem,
+    model: Any,
+    solver_options: RefractionStaticSolverOptions,
+) -> _RefractionStaticRobustRunResult:
+    robust = solver_options.robust
+    n_traces = int(design.qc['n_traces'])
+    rejected_iteration_sorted = np.full(n_traces, -1, dtype=np.int64)
+    initial_row_mask = np.ones(design.n_observations, dtype=bool)
+    if not robust.enabled:
+        raw = _run_lsq_linear(system)
+        return _RefractionStaticRobustRunResult(
+            raw_result=raw,
+            system=system,
+            row_used_mask=initial_row_mask,
+            rejected_iteration_sorted=rejected_iteration_sorted,
+            iteration_summaries=(),
+            stop_reason='disabled',
+        )
+
+    current_row_mask = initial_row_mask.copy()
+    final_raw: optimize.OptimizeResult | None = None
+    final_system: RefractionStaticSolveSystem | None = None
+    stop_reason: RefractionStaticRobustStopReason | None = None
+    summaries: list[RefractionStaticRobustIterationSummary] = []
+
+    for iteration_index in range(robust.max_iterations):
+        current_system = _system_with_observation_row_mask(
+            system,
+            row_used_mask=current_row_mask,
+        )
+        raw = _run_lsq_linear(current_system)
+        parameter_vector = np.ascontiguousarray(raw.x, dtype=np.float64)
+        row_residual = np.ascontiguousarray(
+            design.observed_pick_time_s
+            - _row_modeled_pick_time(design, parameter_vector=parameter_vector),
+            dtype=np.float64,
+        )
+        _validate_finite(row_residual, name='row_residual_s')
+        current_residual = row_residual[current_row_mask]
+        center_s, raw_scale_s = _robust_center_scale(
+            current_residual,
+            method=robust.method,
+        )
+        scale_floor_s = float(robust.scale_floor_ms) / 1000.0
+        scale_s = max(raw_scale_s, scale_floor_s)
+        cutoff_s = float(robust.threshold) * scale_s
+        max_abs_centered_residual_s = _max_abs_centered_residual(
+            current_residual,
+            center_s=center_s,
+        )
+        n_used_before = int(np.count_nonzero(current_row_mask))
+
+        if scale_s <= 0.0:
+            stop_reason = 'zero_scale'
+            final_raw = raw
+            final_system = current_system
+            summaries.append(
+                RefractionStaticRobustIterationSummary(
+                    iteration_index=iteration_index,
+                    method=robust.method,
+                    n_used_before=n_used_before,
+                    n_rejected_this_iteration=0,
+                    n_used_after=n_used_before,
+                    residual_center_s=center_s,
+                    residual_scale_s=raw_scale_s,
+                    residual_scale_floor_s=scale_floor_s,
+                    residual_cutoff_s=cutoff_s,
+                    max_abs_centered_residual_s=max_abs_centered_residual_s,
+                    converged=False,
+                    stop_reason=stop_reason,
+                )
+            )
+            break
+
+        current_row_index = np.flatnonzero(current_row_mask)
+        outlier_local = np.abs(current_residual - center_s) > cutoff_s
+        if not np.any(outlier_local):
+            stop_reason = 'converged'
+            final_raw = raw
+            final_system = current_system
+            summaries.append(
+                RefractionStaticRobustIterationSummary(
+                    iteration_index=iteration_index,
+                    method=robust.method,
+                    n_used_before=n_used_before,
+                    n_rejected_this_iteration=0,
+                    n_used_after=n_used_before,
+                    residual_center_s=center_s,
+                    residual_scale_s=raw_scale_s,
+                    residual_scale_floor_s=scale_floor_s,
+                    residual_cutoff_s=cutoff_s,
+                    max_abs_centered_residual_s=max_abs_centered_residual_s,
+                    converged=True,
+                    stop_reason=stop_reason,
+                )
+            )
+            break
+
+        candidate_rows = current_row_index[outlier_local]
+        candidate_score = np.abs(row_residual[candidate_rows] - center_s)
+        candidate_rows = candidate_rows[np.argsort(-candidate_score, kind='stable')]
+        rejected_rows = _safe_rejection_rows(
+            design=design,
+            system=system,
+            model=model,
+            initial_row_mask=initial_row_mask,
+            current_row_mask=current_row_mask,
+            candidate_rows=candidate_rows,
+            min_used_fraction=robust.min_used_fraction,
+            min_used_observations=robust.min_used_observations,
+        )
+        if rejected_rows.size == 0:
+            stop_reason = 'safe_rejection'
+            final_raw = raw
+            final_system = current_system
+            summaries.append(
+                RefractionStaticRobustIterationSummary(
+                    iteration_index=iteration_index,
+                    method=robust.method,
+                    n_used_before=n_used_before,
+                    n_rejected_this_iteration=0,
+                    n_used_after=n_used_before,
+                    residual_center_s=center_s,
+                    residual_scale_s=raw_scale_s,
+                    residual_scale_floor_s=scale_floor_s,
+                    residual_cutoff_s=cutoff_s,
+                    max_abs_centered_residual_s=max_abs_centered_residual_s,
+                    converged=False,
+                    stop_reason=stop_reason,
+                )
+            )
+            break
+
+        proposed_row_mask = current_row_mask.copy()
+        proposed_row_mask[rejected_rows] = False
+        rejected_trace_index = design.row_trace_index_sorted[rejected_rows]
+        rejected_iteration_sorted[rejected_trace_index] = iteration_index
+        summary_stop_reason: RefractionStaticRobustStopReason | None = None
+        if iteration_index == robust.max_iterations - 1:
+            summary_stop_reason = 'max_iterations'
+        summaries.append(
+            RefractionStaticRobustIterationSummary(
+                iteration_index=iteration_index,
+                method=robust.method,
+                n_used_before=n_used_before,
+                n_rejected_this_iteration=int(rejected_rows.shape[0]),
+                n_used_after=int(np.count_nonzero(proposed_row_mask)),
+                residual_center_s=center_s,
+                residual_scale_s=raw_scale_s,
+                residual_scale_floor_s=scale_floor_s,
+                residual_cutoff_s=cutoff_s,
+                max_abs_centered_residual_s=max_abs_centered_residual_s,
+                converged=False,
+                stop_reason=summary_stop_reason,
+            )
+        )
+        current_row_mask = proposed_row_mask
+    else:
+        stop_reason = 'max_iterations'
+        final_system = _system_with_observation_row_mask(
+            system,
+            row_used_mask=current_row_mask,
+        )
+        final_raw = _run_lsq_linear(final_system)
+
+    if final_raw is None or final_system is None or stop_reason is None:
+        raise RefractionStaticSolverError('robust refraction solver produced no result')
+
+    if int(np.count_nonzero(current_row_mask)) < design.n_observations:
+        final_system = _system_with_observation_row_mask(
+            system,
+            row_used_mask=current_row_mask,
+        )
+        final_raw = _run_lsq_linear(final_system)
+
+    return _RefractionStaticRobustRunResult(
+        raw_result=final_raw,
+        system=final_system,
+        row_used_mask=np.ascontiguousarray(current_row_mask, dtype=bool),
+        rejected_iteration_sorted=np.ascontiguousarray(
+            rejected_iteration_sorted,
+            dtype=np.int64,
+        ),
+        iteration_summaries=tuple(summaries),
+        stop_reason=stop_reason,
+    )
+
+
+def _system_with_observation_row_mask(
+    system: RefractionStaticSolveSystem,
+    *,
+    row_used_mask: np.ndarray,
+) -> RefractionStaticSolveSystem:
+    mask = np.asarray(row_used_mask)
+    if mask.shape != (system.n_observation_rows,):
+        raise RefractionStaticSolverError('robust row mask shape mismatch')
+    if not np.issubdtype(mask.dtype, np.bool_):
+        raise RefractionStaticSolverError('robust row mask must have bool dtype')
+    used_observation_rows = np.flatnonzero(mask).astype(np.int64, copy=False)
+    if used_observation_rows.size == system.n_observation_rows:
+        return system
+    if used_observation_rows.size == 0:
+        raise RefractionStaticSolverError(
+            'robust rejection would drop all observations'
+        )
+    tail_rows = np.arange(
+        system.n_observation_rows,
+        system.n_augmented_rows,
+        dtype=np.int64,
+    )
+    selected_rows = np.ascontiguousarray(
+        np.concatenate((used_observation_rows, tail_rows)),
+        dtype=np.int64,
+    )
+    augmented_matrix = system.augmented_matrix[selected_rows].tocsr()
+    augmented_matrix.sort_indices()
+    augmented_rhs = np.ascontiguousarray(
+        system.augmented_rhs_s[selected_rows],
+        dtype=np.float64,
+    )
+    return RefractionStaticSolveSystem(
+        augmented_matrix=augmented_matrix,
+        augmented_rhs_s=augmented_rhs,
+        lower_bounds=system.lower_bounds,
+        upper_bounds=system.upper_bounds,
+        initial_parameter_vector=system.initial_parameter_vector,
+        n_observation_rows=int(used_observation_rows.size),
+        n_smoothing_rows=system.n_smoothing_rows,
+        n_damping_rows=system.n_damping_rows,
+        n_gauge_rows=system.n_gauge_rows,
+        n_augmented_rows=int(augmented_matrix.shape[0]),
+        n_parameters=system.n_parameters,
+        damping=system.damping,
+        node_lower_bound_s=system.node_lower_bound_s,
+        node_upper_bound_s=system.node_upper_bound_s,
+        slowness_lower_bound_s_per_m=system.slowness_lower_bound_s_per_m,
+        slowness_upper_bound_s_per_m=system.slowness_upper_bound_s_per_m,
+        initial_bedrock_slowness_s_per_m=(
+            system.initial_bedrock_slowness_s_per_m
+        ),
+        smoothing_rows=system.smoothing_rows,
+    )
+
+
+def _safe_rejection_rows(
+    *,
+    design: RefractionStaticDesignMatrix,
+    system: RefractionStaticSolveSystem,
+    model: Any,
+    initial_row_mask: np.ndarray,
+    current_row_mask: np.ndarray,
+    candidate_rows: np.ndarray,
+    min_used_fraction: float,
+    min_used_observations: int,
+) -> np.ndarray:
+    proposed = np.ascontiguousarray(current_row_mask.copy(), dtype=bool)
+    accepted: list[int] = []
+    for raw_row in candidate_rows.tolist():
+        row = int(raw_row)
+        trial = proposed.copy()
+        trial[row] = False
+        if not _robust_row_mask_is_safe(
+            design=design,
+            system=system,
+            model=model,
+            initial_row_mask=initial_row_mask,
+            row_used_mask=trial,
+            min_used_fraction=min_used_fraction,
+            min_used_observations=min_used_observations,
+        ):
+            continue
+        proposed = trial
+        accepted.append(row)
+    return np.ascontiguousarray(accepted, dtype=np.int64)
+
+
+def _robust_row_mask_is_safe(
+    *,
+    design: RefractionStaticDesignMatrix,
+    system: RefractionStaticSolveSystem,
+    model: Any,
+    initial_row_mask: np.ndarray,
+    row_used_mask: np.ndarray,
+    min_used_fraction: float,
+    min_used_observations: int,
+) -> bool:
+    n_used = int(np.count_nonzero(row_used_mask))
+    min_fraction_count = int(
+        np.ceil(float(np.count_nonzero(initial_row_mask)) * min_used_fraction)
+    )
+    if n_used < max(min_fraction_count, int(min_used_observations)):
+        return False
+    if (
+        n_used
+        + system.n_smoothing_rows
+        + system.n_damping_rows
+        + system.n_gauge_rows
+        < system.n_parameters
+    ):
+        return False
+    if not _node_coverage_is_safe(design, row_used_mask=row_used_mask):
+        return False
+    if design.bedrock_velocity_mode == 'solve_cell':
+        return _cell_coverage_is_safe(
+            design,
+            model=model,
+            row_used_mask=row_used_mask,
+        )
+    return True
+
+
+def _node_coverage_is_safe(
+    design: RefractionStaticDesignMatrix,
+    *,
+    row_used_mask: np.ndarray,
+) -> bool:
+    counts = np.zeros(design.n_active_nodes, dtype=np.int64)
+    row_indices = np.flatnonzero(row_used_mask)
+    if row_indices.size == 0:
+        return False
+    np.add.at(counts, design.source_node_col[row_indices], 1)
+    np.add.at(counts, design.receiver_node_col[row_indices], 1)
+    return bool(np.all(counts >= int(design.min_observations_per_node)))
+
+
+def _cell_coverage_is_safe(
+    design: RefractionStaticDesignMatrix,
+    *,
+    model: Any,
+    row_used_mask: np.ndarray,
+) -> bool:
+    _validate_cell_design(design)
+    if design.active_cell_id is None or design.row_midpoint_cell_id is None:
+        raise RefractionStaticSolverError('solve_cell design requires cell metadata')
+    refractor_cell = getattr(model, 'refractor_cell', None)
+    min_observations = int(
+        getattr(
+            refractor_cell,
+            'min_observations_per_cell',
+            design.qc.get('min_observations_per_cell', 1),
+        )
+    )
+    if design.n_total_cells is None:
+        raise RefractionStaticSolverError('solve_cell design requires n_total_cells')
+    used_cell_id = design.row_midpoint_cell_id[row_used_mask]
+    counts = np.bincount(
+        used_cell_id,
+        minlength=int(design.n_total_cells),
+    ).astype(np.int64, copy=False)
+    return bool(np.all(counts[design.active_cell_id] >= min_observations))
+
+
+def _robust_center_scale(
+    residual_s: np.ndarray,
+    *,
+    method: str,
+) -> tuple[float, float]:
+    if residual_s.size == 0:
+        raise RefractionStaticSolverError('robust residual_s must be non-empty')
+    _validate_finite(residual_s, name='robust residual_s')
+    robust_method = _validate_robust_method(method)
+    if robust_method == 'mad':
+        center = float(np.median(residual_s))
+        raw_mad = float(np.median(np.abs(residual_s - center)))
+        scale = 1.4826 * raw_mad
+    else:
+        center = float(np.mean(residual_s))
+        scale = float(np.std(residual_s, ddof=0))
+    return center, scale
+
+
+def _max_abs_centered_residual(
+    residual_s: np.ndarray,
+    *,
+    center_s: float,
+) -> float:
+    if residual_s.size == 0:
+        return 0.0
+    return float(np.max(np.abs(residual_s - center_s)))
+
+
+def _validate_robust_method(value: object) -> str:
+    if value == 'mad':
+        return 'mad'
+    if value == 'sigma':
+        return 'sigma'
+    raise RefractionStaticSolverError('solver.robust.method must be mad or sigma')
 
 
 def _run_lsq_linear(system: RefractionStaticSolveSystem) -> optimize.OptimizeResult:
@@ -945,6 +1434,7 @@ def _build_solver_qc(
     bedrock_velocity_status: str,
     node_solution_status: np.ndarray,
     cell_velocity_status: np.ndarray,
+    robust_result: _RefractionStaticRobustRunResult,
 ) -> dict[str, Any]:
     unique_status, status_counts = np.unique(node_solution_status, return_counts=True)
     unique_cell_status, cell_status_counts = np.unique(
@@ -958,6 +1448,13 @@ def _build_solver_qc(
         'bedrock_slowness_s_per_m': float(bedrock_slowness_s_per_m),
         'bedrock_velocity_status': bedrock_velocity_status,
         'n_observations': int(design.n_observations),
+        'n_initial_used_observations': int(design.n_observations),
+        'n_final_used_observations': int(
+            np.count_nonzero(robust_result.row_used_mask)
+        ),
+        'n_rejected_observations': int(
+            design.n_observations - np.count_nonzero(robust_result.row_used_mask)
+        ),
         'n_parameters': int(design.n_parameters),
         'n_augmented_rows': int(system.n_augmented_rows),
         'n_smoothing_rows': int(system.n_smoothing_rows),
@@ -983,6 +1480,16 @@ def _build_solver_qc(
         'solver_optimality': float(result.optimality),
         'solver_iterations': int(result.nit),
         'rms_residual_ms': float(rms_residual_s * 1000.0),
+        'robust_enabled': bool(
+            robust_result.stop_reason != 'disabled'
+            or len(robust_result.iteration_summaries) > 0
+        ),
+        'robust_stop_reason': robust_result.stop_reason,
+        'robust_iteration_count': len(robust_result.iteration_summaries),
+        'robust_iterations': [
+            _robust_iteration_summary_json(summary)
+            for summary in robust_result.iteration_summaries
+        ],
         'node_solution_status_counts': {
             str(key): int(value)
             for key, value in zip(
@@ -1007,6 +1514,27 @@ def _build_solver_qc(
     return qc
 
 
+def _robust_iteration_summary_json(
+    summary: RefractionStaticRobustIterationSummary,
+) -> dict[str, Any]:
+    return {
+        'iteration_index': int(summary.iteration_index),
+        'method': str(summary.method),
+        'n_used_before': int(summary.n_used_before),
+        'n_rejected_this_iteration': int(summary.n_rejected_this_iteration),
+        'n_used_after': int(summary.n_used_after),
+        'residual_center_s': float(summary.residual_center_s),
+        'residual_scale_s': float(summary.residual_scale_s),
+        'residual_scale_floor_s': float(summary.residual_scale_floor_s),
+        'residual_cutoff_s': float(summary.residual_cutoff_s),
+        'max_abs_centered_residual_s': float(
+            summary.max_abs_centered_residual_s
+        ),
+        'converged': bool(summary.converged),
+        'stop_reason': summary.stop_reason,
+    }
+
+
 def _optional_float(value: float | None) -> float | None:
     if value is None:
         return None
@@ -1014,6 +1542,8 @@ def _optional_float(value: float | None) -> float | None:
 
 
 __all__ = [
+    'RefractionStaticRobustIterationSummary',
+    'RefractionStaticRobustStopReason',
     'RefractionStaticSolveResult',
     'RefractionStaticSolveSystem',
     'RefractionStaticSolverError',
