@@ -136,6 +136,23 @@ where:
 result.applied_shift_s = -result.trace_delay_s
 ```
 
+For time-term inversion, `trace_time_term_delay_s_sorted > 0` likewise means
+the event is late. The weathering correction applied to the trace is:
+
+```text
+applied_weathering_shift_s_sorted = -trace_time_term_delay_s_sorted
+```
+
+The final trace shift is the sum of already-applied datum and residual shifts
+plus the time-term weathering shift:
+
+```text
+final_applied_shift_s_sorted =
+    datum_applied_shift_s_sorted
+    + residual_applied_shift_s_sorted
+    + applied_weathering_shift_s_sorted
+```
+
 ## Invalid traces and zero weights
 
 `valid_mask=False` means the trace is not used as a valid lag observation. For such traces, the source/receiver delay prediction is not evaluated, and the result values are `NaN`:
