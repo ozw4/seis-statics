@@ -8,7 +8,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = REPO_ROOT / 'src' / 'seis_statics'
-PROHIBITED_MODULE_ROOTS = frozenset({'app', 'fastapi', 'pydantic', 'segyio'})
+PROHIBITED_MODULE_ROOTS = frozenset(
+    {'app', 'fastapi', 'pydantic', 'segyio', 'seisviewer2d'}
+)
 PROHIBITED_PATH_PARTS = frozenset({'seisviewer2d'})
 PROHIBITED_IMPORT_NAMES = frozenset(
     {
@@ -142,6 +144,8 @@ def test_prohibited_import_collector_flags_ast_imports(tmp_path: Path) -> None:
                 'import fastapi',
                 'from pydantic import BaseModel',
                 'import segyio.tools',
+                'import seisviewer2d',
+                'from seisviewer2d.seis_statics import time_term',
                 'from runtime.trace_store import TraceStore',
                 'from runtime.job_runtime import run_job',
                 'from runtime.artifact_registry import ArtifactRegistry',
@@ -165,8 +169,10 @@ def test_prohibited_import_collector_flags_ast_imports(tmp_path: Path) -> None:
         'seis_statics/bad.py:5',
         'seis_statics/bad.py:6',
         'seis_statics/bad.py:7',
-        'seis_statics/bad.py:10',
-        'seis_statics/bad.py:11',
+        'seis_statics/bad.py:8',
+        'seis_statics/bad.py:9',
         'seis_statics/bad.py:12',
         'seis_statics/bad.py:13',
+        'seis_statics/bad.py:14',
+        'seis_statics/bad.py:15',
     ]

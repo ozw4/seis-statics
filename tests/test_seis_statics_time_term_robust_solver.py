@@ -157,6 +157,19 @@ def test_min_used_fraction_prevents_rejecting_too_many_observations() -> None:
         )
 
 
+def test_min_used_count_prevents_rejecting_too_many_observations() -> None:
+    with pytest.raises(ValueError, match='min_used_count'):
+        solve_time_term_robust_least_squares(
+            _grid_design(outlier_index=13, outlier_s=0.04),
+            sparse_solver_options=_options(),
+            robust_options=TimeTermRobustOptions(
+                method='mad',
+                threshold=3.0,
+                min_used_count=25,
+            ),
+        )
+
+
 def test_zero_scale_stop_reason_reported_for_perfectly_fitted_data() -> None:
     result = solve_time_term_robust_least_squares(
         _grid_design(),

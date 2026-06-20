@@ -37,6 +37,7 @@ class TimeTermRobustOptions:
     max_iterations: int = 3
     threshold: float = 4.0
     min_used_fraction: float = 0.5
+    min_used_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,10 @@ def validate_time_term_robust_options(
             name='threshold',
         ),
         min_used_fraction=_coerce_min_used_fraction(options.min_used_fraction),
+        min_used_count=_coerce_positive_int(
+            options.min_used_count,
+            name='min_used_count',
+        ),
     )
 
 
@@ -264,7 +269,10 @@ def solve_time_term_robust_least_squares(
             proposed_used_mask,
             min_used_fraction=validated_robust_options.min_used_fraction,
         )
-        _validate_min_used_count(proposed_used_mask)
+        _validate_min_used_count(
+            proposed_used_mask,
+            min_used_count=validated_robust_options.min_used_count,
+        )
 
         rejected_iteration_sorted[newly_rejected_indices] = iteration_index
         n_rejected = int(newly_rejected_indices.shape[0])
@@ -503,9 +511,19 @@ def _validate_min_used_fraction(
         )
 
 
-def _validate_min_used_count(proposed_used_mask: np.ndarray) -> None:
-    if int(np.count_nonzero(proposed_used_mask)) <= 0:
+def _validate_min_used_count(
+    proposed_used_mask: np.ndarray,
+    *,
+    min_used_count: int,
+) -> None:
+    proposed_count = int(np.count_nonzero(proposed_used_mask))
+    if proposed_count >= min_used_count:
+        return
+    if min_used_count <= 1:
         raise ValueError('robust outlier rejection would drop all used traces')
+    raise ValueError(
+        'robust outlier rejection would drop used traces below min_used_count'
+    )
 
 
 def _max_abs_centered_residual(
