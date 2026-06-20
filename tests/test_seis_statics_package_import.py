@@ -49,6 +49,9 @@ residual = importlib.import_module('seis_statics.residual')
 time_term = importlib.import_module('seis_statics.time_term')
 time_term_moveout = importlib.import_module('seis_statics.time_term.moveout')
 time_term_types = importlib.import_module('seis_statics.time_term.types')
+refraction = importlib.import_module('seis_statics.refraction')
+refraction_options = importlib.import_module('seis_statics.refraction.options')
+refraction_status = importlib.import_module('seis_statics.refraction.status')
 validation = importlib.import_module('seis_statics.validation')
 
 assert seis_statics.__name__ == 'seis_statics'
@@ -57,10 +60,15 @@ assert residual.__name__ == 'seis_statics.residual'
 assert time_term.__name__ == 'seis_statics.time_term'
 assert time_term_moveout.__name__ == 'seis_statics.time_term.moveout'
 assert time_term_types.__name__ == 'seis_statics.time_term.types'
+assert refraction.__name__ == 'seis_statics.refraction'
+assert refraction_options.__name__ == 'seis_statics.refraction.options'
+assert refraction_status.__name__ == 'seis_statics.refraction.status'
 assert validation.__name__ == 'seis_statics.validation'
 assert callable(time_term.compute_time_term_moveout)
+assert callable(refraction.classify_refraction_endpoint_static_status)
 assert callable(validation.coerce_1d_real_numeric_float64)
 assert 'compute_time_term_moveout' in time_term.__all__
+assert 'RefractionStaticModelOptions' in refraction.__all__
 assert 'coerce_1d_real_numeric_float64' in validation.__all__
 """
     env = os.environ.copy()
