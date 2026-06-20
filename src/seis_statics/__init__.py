@@ -1,8 +1,8 @@
-"""Static-correction numerical core intended for future extraction.
+"""Standalone static-correction numerical core.
 
-This package is the internal boundary for statics logic that can eventually
-move to a standalone ``seis-statics`` repository. Keep package imports light
-and independent from the FastAPI application.
+This package contains application-independent statics logic for downstream
+tools such as ``seisviewer2d``. Keep imports light and independent from
+viewer, API, SEG-Y I/O, job runtime, and artifact-management code.
 """
 
 __all__: list[str] = []
