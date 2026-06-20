@@ -15,6 +15,13 @@ from seis_statics._validation import (
     coerce_positive_finite_float as _coerce_positive_finite_float,
     coerce_positive_int as _coerce_positive_int,
 )
+from seis_statics.refraction.cell_regularization import (
+    CellSlownessSmoothingRows,
+    build_cell_slowness_smoothing_rows,
+)
+from seis_statics.refraction.cell_velocity_status import (
+    LOW_FOLD_CELL_VELOCITY_STATUS,
+)
 from seis_statics.refraction.design_matrix import (
     LOW_FOLD_NODE_STATUS,
     RefractionStaticDesignMatrix,
@@ -52,6 +59,7 @@ class RefractionStaticSolveSystem:
     initial_parameter_vector: np.ndarray
 
     n_observation_rows: int
+    n_smoothing_rows: int
     n_damping_rows: int
     n_gauge_rows: int
     n_augmented_rows: int
@@ -63,11 +71,12 @@ class RefractionStaticSolveSystem:
     slowness_lower_bound_s_per_m: float | None
     slowness_upper_bound_s_per_m: float | None
     initial_bedrock_slowness_s_per_m: float | None
+    smoothing_rows: CellSlownessSmoothingRows | None
 
 
 @dataclass(frozen=True)
 class RefractionStaticSolveResult:
-    """Non-robust global/fixed GLI refraction static solution."""
+    """Non-robust GLI refraction static solution."""
 
     parameter_vector: np.ndarray
 
@@ -80,6 +89,17 @@ class RefractionStaticSolveResult:
     bedrock_velocity_m_s: float
     bedrock_slowness_s_per_m: float
     bedrock_velocity_status: str
+
+    cell_id: np.ndarray
+    cell_bedrock_slowness_s_per_m: np.ndarray
+    cell_bedrock_velocity_m_s: np.ndarray
+    cell_velocity_status: np.ndarray
+    cell_observation_count: np.ndarray
+    row_midpoint_cell_id: np.ndarray
+    row_midpoint_bedrock_slowness_s_per_m: np.ndarray
+    row_midpoint_bedrock_velocity_m_s: np.ndarray
+    row_midpoint_v2_m_s: np.ndarray
+    cell_v2_m_s: np.ndarray
 
     modeled_pick_time_s_sorted: np.ndarray
     residual_s_sorted: np.ndarray
@@ -113,7 +133,7 @@ def build_refraction_static_solver_system(
 ) -> RefractionStaticSolveSystem:
     """Build observation, damping, gauge, bounds, and initial vector."""
     options = validate_refraction_static_solver_options(solver_options)
-    _validate_global_design(design)
+    _validate_design(design)
     _validate_model_for_design(model=model, design=design)
 
     n_parameters = int(design.n_parameters)
@@ -130,37 +150,24 @@ def build_refraction_static_solver_system(
     initial_slowness: float | None = None
     if design.bedrock_velocity_mode == 'solve_global':
         slowness_col = _global_slowness_col(design)
-        min_velocity = _positive_model_float(
-            model,
-            'min_bedrock_velocity_m_s',
-            name='model.min_bedrock_velocity_m_s',
-        )
-        max_velocity = _positive_model_float(
-            model,
-            'max_bedrock_velocity_m_s',
-            name='model.max_bedrock_velocity_m_s',
-        )
-        if min_velocity >= max_velocity:
-            raise RefractionStaticSolverError(
-                'model.min_bedrock_velocity_m_s must be less than '
-                'model.max_bedrock_velocity_m_s'
-            )
-        initial_velocity = _positive_model_float(
-            model,
-            'initial_bedrock_velocity_m_s',
-            name='model.initial_bedrock_velocity_m_s',
-        )
-        if not (min_velocity <= initial_velocity <= max_velocity):
-            raise RefractionStaticSolverError(
-                'model.initial_bedrock_velocity_m_s must be within bedrock '
-                'velocity bounds'
-            )
+        min_velocity, max_velocity, initial_velocity = _model_velocity_bounds(model)
         slowness_lower = float(1.0 / max_velocity)
         slowness_upper = float(1.0 / min_velocity)
         initial_slowness = float(1.0 / initial_velocity)
         lower_bounds[slowness_col] = slowness_lower
         upper_bounds[slowness_col] = slowness_upper
         initial[slowness_col] = initial_slowness
+    elif design.bedrock_velocity_mode == 'solve_cell':
+        min_velocity, max_velocity, initial_velocity = _model_velocity_bounds(model)
+        slowness_lower = float(1.0 / max_velocity)
+        slowness_upper = float(1.0 / min_velocity)
+        initial_slowness = float(1.0 / initial_velocity)
+        for col in _cell_slowness_cols(design):
+            lower_bounds[col] = slowness_lower
+            upper_bounds[col] = slowness_upper
+            initial[col] = initial_slowness
+
+    smoothing_rows = _build_cell_smoothing_rows_for_design(design, model=model)
 
     damping_matrix, damping_rhs = _build_damping_system(
         n_parameters=n_parameters,
@@ -171,13 +178,29 @@ def build_refraction_static_solver_system(
     gauge_rhs = np.zeros(gauge_matrix.shape[0], dtype=np.float64)
 
     augmented_matrix = sparse.vstack(
-        [design.matrix, damping_matrix, gauge_matrix],
+        [
+            design.matrix,
+            (
+                smoothing_rows.matrix
+                if smoothing_rows is not None
+                else _empty_rows(n_parameters)
+            ),
+            damping_matrix,
+            gauge_matrix,
+        ],
         format='csr',
         dtype=np.float64,
     )
     augmented_matrix.sort_indices()
     augmented_rhs = np.ascontiguousarray(
-        np.concatenate([design.rhs_s, damping_rhs, gauge_rhs]),
+        np.concatenate(
+            [
+                design.rhs_s,
+                smoothing_rows.rhs_s if smoothing_rows is not None else np.empty(0),
+                damping_rhs,
+                gauge_rhs,
+            ]
+        ),
         dtype=np.float64,
     )
     n_augmented_rows = int(augmented_matrix.shape[0])
@@ -196,6 +219,7 @@ def build_refraction_static_solver_system(
         upper_bounds=np.ascontiguousarray(upper_bounds, dtype=np.float64),
         initial_parameter_vector=np.ascontiguousarray(initial, dtype=np.float64),
         n_observation_rows=int(design.n_observations),
+        n_smoothing_rows=0 if smoothing_rows is None else smoothing_rows.n_rows,
         n_damping_rows=int(damping_matrix.shape[0]),
         n_gauge_rows=int(gauge_matrix.shape[0]),
         n_augmented_rows=n_augmented_rows,
@@ -206,6 +230,7 @@ def build_refraction_static_solver_system(
         slowness_lower_bound_s_per_m=slowness_lower,
         slowness_upper_bound_s_per_m=slowness_upper,
         initial_bedrock_slowness_s_per_m=initial_slowness,
+        smoothing_rows=smoothing_rows,
     )
 
 
@@ -217,13 +242,8 @@ def solve_refraction_static_least_squares(
     resolved_first_layer: ResolvedRefractionFirstLayer | None = None,
     include_diagnostics: bool = False,
 ) -> RefractionStaticSolveResult:
-    """Build and solve a non-robust global/fixed GLI refraction system."""
+    """Build and solve a non-robust GLI refraction system."""
     options = validate_refraction_static_solver_options(solver_options)
-    if getattr(model, 'bedrock_velocity_mode', None) == 'solve_cell':
-        raise RefractionStaticSolverError(
-            'solve_cell mode is not supported by this solver; use the cell '
-            'solver implementation from the follow-up issue'
-        )
     design = build_refraction_static_design_matrix(
         input_model=input_model,
         model=model,
@@ -244,7 +264,7 @@ def solve_refraction_static_design_least_squares(
     model: Any,
     solver_options: RefractionStaticSolverOptions | None = None,
 ) -> RefractionStaticSolveResult:
-    """Solve a pre-built non-robust global/fixed refraction design matrix."""
+    """Solve a pre-built non-robust refraction design matrix."""
     options = validate_refraction_static_solver_options(solver_options)
     system = build_refraction_static_solver_system(
         design,
@@ -284,6 +304,20 @@ def solve_refraction_static_design_least_squares(
         parameter_vector=parameter_vector,
         active_mask=raw.active_mask,
     )
+    (
+        cell_id,
+        cell_slowness,
+        cell_velocity,
+        cell_status,
+        cell_observation_count,
+        row_midpoint_cell_id,
+        row_midpoint_slowness,
+        row_midpoint_velocity,
+    ) = _cell_solution(
+        design,
+        parameter_vector=parameter_vector,
+        active_mask=raw.active_mask,
+    )
     rms_s = _rms(row_residual)
     qc = _build_solver_qc(
         design=design,
@@ -294,6 +328,7 @@ def solve_refraction_static_design_least_squares(
         bedrock_slowness_s_per_m=bedrock_slowness,
         bedrock_velocity_status=bedrock_status,
         node_solution_status=node_status,
+        cell_velocity_status=cell_status,
     )
 
     return RefractionStaticSolveResult(
@@ -309,6 +344,16 @@ def solve_refraction_static_design_least_squares(
         bedrock_velocity_m_s=bedrock_velocity,
         bedrock_slowness_s_per_m=bedrock_slowness,
         bedrock_velocity_status=bedrock_status,
+        cell_id=cell_id,
+        cell_bedrock_slowness_s_per_m=cell_slowness,
+        cell_bedrock_velocity_m_s=cell_velocity,
+        cell_velocity_status=cell_status,
+        cell_observation_count=cell_observation_count,
+        row_midpoint_cell_id=row_midpoint_cell_id,
+        row_midpoint_bedrock_slowness_s_per_m=row_midpoint_slowness,
+        row_midpoint_bedrock_velocity_m_s=row_midpoint_velocity,
+        row_midpoint_v2_m_s=row_midpoint_velocity,
+        cell_v2_m_s=cell_velocity,
         modeled_pick_time_s_sorted=full_modeled,
         residual_s_sorted=full_residual,
         residual_ms_sorted=np.ascontiguousarray(full_residual * 1000.0),
@@ -377,18 +422,19 @@ def validate_refraction_static_solver_options(
     )
 
 
-def _validate_global_design(design: RefractionStaticDesignMatrix) -> None:
+def _validate_design(design: RefractionStaticDesignMatrix) -> None:
     if not isinstance(design, RefractionStaticDesignMatrix):
         raise RefractionStaticSolverError(
             'design must be a RefractionStaticDesignMatrix instance'
         )
-    if design.bedrock_velocity_mode == 'solve_cell':
+    if design.bedrock_velocity_mode not in {
+        'solve_global',
+        'fixed_global',
+        'solve_cell',
+    }:
         raise RefractionStaticSolverError(
-            'solve_cell mode is not supported by this solver'
-        )
-    if design.bedrock_velocity_mode not in {'solve_global', 'fixed_global'}:
-        raise RefractionStaticSolverError(
-            'design.bedrock_velocity_mode must be solve_global or fixed_global'
+            'design.bedrock_velocity_mode must be solve_global, fixed_global, '
+            'or solve_cell'
         )
     if design.matrix.shape != (design.n_observations, design.n_parameters):
         raise RefractionStaticSolverError('design.matrix shape mismatch')
@@ -413,6 +459,18 @@ def _validate_model_for_design(
         raise RefractionStaticSolverError(
             'model.bedrock_velocity_mode must match design.bedrock_velocity_mode'
         )
+    if mode == 'solve_cell':
+        if getattr(model, 'bedrock_velocity_m_s', None) is not None:
+            raise RefractionStaticSolverError(
+                'model.bedrock_velocity_m_s is only allowed when '
+                'model.bedrock_velocity_mode is fixed_global'
+            )
+        if getattr(model, 'refractor_cell', None) is None:
+            raise RefractionStaticSolverError(
+                'model.refractor_cell is required when '
+                'model.bedrock_velocity_mode is solve_cell'
+            )
+        _validate_cell_design(design)
     if mode == 'fixed_global':
         fixed_velocity = _positive_model_float(
             model,
@@ -428,6 +486,108 @@ def _validate_model_for_design(
             raise RefractionStaticSolverError(
                 'model.bedrock_velocity_m_s must match design fixed velocity'
             )
+
+
+def _validate_cell_design(design: RefractionStaticDesignMatrix) -> None:
+    if design.active_cell_id is None or design.inactive_cell_id is None:
+        raise RefractionStaticSolverError('solve_cell design requires cell IDs')
+    if design.cell_id_to_col is None:
+        raise RefractionStaticSolverError('solve_cell design requires cell columns')
+    if design.row_midpoint_cell_id is None or design.row_midpoint_cell_col is None:
+        raise RefractionStaticSolverError(
+            'solve_cell design requires row midpoint cell columns'
+        )
+    if design.bedrock_slowness_cell_col_start is None:
+        raise RefractionStaticSolverError(
+            'solve_cell design requires bedrock slowness cell column start'
+        )
+    if design.n_total_cells is None or design.number_of_cell_x is None:
+        raise RefractionStaticSolverError('solve_cell design requires cell grid shape')
+
+
+def _model_velocity_bounds(model: Any) -> tuple[float, float, float]:
+    min_velocity = _positive_model_float(
+        model,
+        'min_bedrock_velocity_m_s',
+        name='model.min_bedrock_velocity_m_s',
+    )
+    max_velocity = _positive_model_float(
+        model,
+        'max_bedrock_velocity_m_s',
+        name='model.max_bedrock_velocity_m_s',
+    )
+    if min_velocity >= max_velocity:
+        raise RefractionStaticSolverError(
+            'model.min_bedrock_velocity_m_s must be less than '
+            'model.max_bedrock_velocity_m_s'
+        )
+    initial_velocity = _positive_model_float(
+        model,
+        'initial_bedrock_velocity_m_s',
+        name='model.initial_bedrock_velocity_m_s',
+    )
+    if not (min_velocity <= initial_velocity <= max_velocity):
+        raise RefractionStaticSolverError(
+            'model.initial_bedrock_velocity_m_s must be within bedrock '
+            'velocity bounds'
+        )
+    return min_velocity, max_velocity, initial_velocity
+
+
+def _cell_slowness_cols(design: RefractionStaticDesignMatrix) -> np.ndarray:
+    _validate_cell_design(design)
+    if design.active_cell_id is None or design.cell_id_to_col is None:
+        raise RefractionStaticSolverError('solve_cell design requires active cells')
+    return np.asarray(
+        [design.cell_id_to_col[int(cell_id)] for cell_id in design.active_cell_id],
+        dtype=np.int64,
+    )
+
+
+def _build_cell_smoothing_rows_for_design(
+    design: RefractionStaticDesignMatrix,
+    *,
+    model: Any,
+) -> CellSlownessSmoothingRows | None:
+    if design.bedrock_velocity_mode != 'solve_cell':
+        return None
+    _validate_cell_design(design)
+    refractor_cell = getattr(model, 'refractor_cell', None)
+    if refractor_cell is None:
+        raise RefractionStaticSolverError(
+            'model.refractor_cell is required when model.bedrock_velocity_mode '
+            'is solve_cell'
+        )
+    if (
+        design.active_cell_id is None
+        or design.cell_id_to_col is None
+        or design.n_total_cells is None
+        or design.number_of_cell_x is None
+    ):
+        raise RefractionStaticSolverError('solve_cell design requires cell metadata')
+    return build_cell_slowness_smoothing_rows(
+        active_cell_id=design.active_cell_id,
+        velocity_smoothing_weight=getattr(
+            refractor_cell,
+            'velocity_smoothing_weight',
+            0.0,
+        ),
+        smoothing_reference_distance_m=getattr(
+            refractor_cell,
+            'smoothing_reference_distance_m',
+            None,
+        ),
+        row_distance_m=design.row_distance_m,
+        n_total_cells=design.n_total_cells,
+        number_of_cell_x=design.number_of_cell_x,
+        number_of_cell_y=design.number_of_cell_y,
+        cell_id_to_col=design.cell_id_to_col,
+        n_parameters=design.n_parameters,
+    )
+
+
+def _empty_rows(n_parameters: int) -> sparse.csr_matrix:
+    return sparse.csr_matrix((0, n_parameters), dtype=np.float64)
 
 
 def _build_damping_system(
@@ -594,6 +754,8 @@ def _bedrock_solution(
                 'fixed_global design requires fixed bedrock velocity'
             )
         return float(fixed_slowness), float(fixed_velocity), 'fixed'
+    if design.bedrock_velocity_mode == 'solve_cell':
+        return float('nan'), float('nan'), 'cell'
 
     col = _global_slowness_col(design)
     slowness = float(parameter_vector[col])
@@ -608,6 +770,112 @@ def _bedrock_solution(
     else:
         status = 'solved'
     return slowness, velocity, status
+
+
+def _cell_solution(
+    design: RefractionStaticDesignMatrix,
+    *,
+    parameter_vector: np.ndarray,
+    active_mask: np.ndarray,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    if design.bedrock_velocity_mode != 'solve_cell':
+        return (
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.float64),
+            np.empty(0, dtype=np.float64),
+            np.empty(0, dtype='<U32'),
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.float64),
+            np.empty(0, dtype=np.float64),
+        )
+    _validate_cell_design(design)
+    if (
+        design.n_total_cells is None
+        or design.active_cell_id is None
+        or design.cell_id_to_col is None
+        or design.row_midpoint_cell_id is None
+        or design.row_midpoint_cell_col is None
+    ):
+        raise RefractionStaticSolverError('solve_cell design requires cell metadata')
+
+    cell_id = np.arange(design.n_total_cells, dtype=np.int64)
+    cell_slowness = np.full(cell_id.shape, np.nan, dtype=np.float64)
+    cell_velocity = np.full(cell_id.shape, np.nan, dtype=np.float64)
+    cell_status = np.full(cell_id.shape, 'inactive', dtype='<U32')
+
+    low_fold_cell_id = np.asarray(
+        design.qc.get('low_fold_cell_id', []),
+        dtype=np.int64,
+    )
+    if low_fold_cell_id.size:
+        cell_status[low_fold_cell_id] = LOW_FOLD_CELL_VELOCITY_STATUS
+
+    solver_active_mask = _coerce_active_mask(
+        active_mask,
+        expected_shape=(design.n_parameters,),
+    )
+    for raw_cell_id in design.active_cell_id.tolist():
+        current_cell = int(raw_cell_id)
+        col = int(design.cell_id_to_col[current_cell])
+        slowness = float(parameter_vector[col])
+        if slowness <= 0.0 or not np.isfinite(slowness):
+            raise RefractionStaticSolverError(
+                'estimated cell bedrock slowness must be positive'
+            )
+        cell_slowness[current_cell] = slowness
+        cell_velocity[current_cell] = float(1.0 / slowness)
+        mask_value = int(solver_active_mask[col])
+        if mask_value < 0:
+            cell_status[current_cell] = 'clipped_upper'
+        elif mask_value > 0:
+            cell_status[current_cell] = 'clipped_lower'
+        else:
+            cell_status[current_cell] = 'solved'
+
+    row_midpoint_cell_id = np.ascontiguousarray(
+        design.row_midpoint_cell_id,
+        dtype=np.int64,
+    )
+    row_midpoint_slowness = np.ascontiguousarray(
+        cell_slowness[row_midpoint_cell_id],
+        dtype=np.float64,
+    )
+    row_midpoint_velocity = np.ascontiguousarray(
+        cell_velocity[row_midpoint_cell_id],
+        dtype=np.float64,
+    )
+    _validate_finite(row_midpoint_slowness, name='row_midpoint_bedrock_slowness')
+    _validate_finite(row_midpoint_velocity, name='row_midpoint_bedrock_velocity')
+
+    cell_observation_count = np.asarray(
+        design.qc.get(
+            'cell_observation_count',
+            np.zeros(cell_id.shape, dtype=np.int64),
+        ),
+        dtype=np.int64,
+    )
+    if cell_observation_count.shape != cell_id.shape:
+        raise RefractionStaticSolverError('cell_observation_count shape mismatch')
+    return (
+        np.ascontiguousarray(cell_id, dtype=np.int64),
+        np.ascontiguousarray(cell_slowness, dtype=np.float64),
+        np.ascontiguousarray(cell_velocity, dtype=np.float64),
+        np.ascontiguousarray(cell_status),
+        np.ascontiguousarray(cell_observation_count, dtype=np.int64),
+        row_midpoint_cell_id,
+        row_midpoint_slowness,
+        row_midpoint_velocity,
+    )
 
 
 def _coerce_active_mask(
@@ -676,9 +944,14 @@ def _build_solver_qc(
     bedrock_slowness_s_per_m: float,
     bedrock_velocity_status: str,
     node_solution_status: np.ndarray,
+    cell_velocity_status: np.ndarray,
 ) -> dict[str, Any]:
     unique_status, status_counts = np.unique(node_solution_status, return_counts=True)
-    return {
+    unique_cell_status, cell_status_counts = np.unique(
+        cell_velocity_status,
+        return_counts=True,
+    )
+    qc = {
         'method': 'gli_variable_thickness',
         'bedrock_velocity_mode': design.bedrock_velocity_mode,
         'bedrock_velocity_m_s': float(bedrock_velocity_m_s),
@@ -687,6 +960,7 @@ def _build_solver_qc(
         'n_observations': int(design.n_observations),
         'n_parameters': int(design.n_parameters),
         'n_augmented_rows': int(system.n_augmented_rows),
+        'n_smoothing_rows': int(system.n_smoothing_rows),
         'n_damping_rows': int(system.n_damping_rows),
         'n_gauge_rows': int(system.n_gauge_rows),
         'damping': float(system.damping),
@@ -719,6 +993,18 @@ def _build_solver_qc(
         },
         'design_matrix': dict(design.qc),
     }
+    if system.smoothing_rows is not None:
+        qc['cell_smoothing'] = dict(system.smoothing_rows.qc)
+    if cell_velocity_status.size:
+        qc['cell_velocity_status_counts'] = {
+            str(key): int(value)
+            for key, value in zip(
+                unique_cell_status.tolist(),
+                cell_status_counts.tolist(),
+                strict=True,
+            )
+        }
+    return qc
 
 
 def _optional_float(value: float | None) -> float | None:

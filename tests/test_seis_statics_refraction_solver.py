@@ -179,7 +179,7 @@ def test_refraction_solver_marks_global_velocity_bound_status() -> None:
     assert result.bedrock_velocity_status == 'clipped_upper'
 
 
-def test_refraction_solver_rejects_unsupported_cell_and_robust_paths() -> None:
+def test_refraction_solver_rejects_robust_and_mismatched_design_model_modes() -> None:
     source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
         _known_global_arrays()
     )
@@ -216,7 +216,7 @@ def test_refraction_solver_rejects_unsupported_cell_and_robust_paths() -> None:
         cell_assignment_mode='midpoint',
         n_traces=6,
     )
-    with pytest.raises(RefractionStaticSolverError, match='solve_cell'):
+    with pytest.raises(RefractionStaticSolverError, match='must match'):
         solve_refraction_static_design_least_squares(
             cell_design,
             model=_model(mode='solve_global'),
