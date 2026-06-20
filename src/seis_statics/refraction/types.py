@@ -107,6 +107,46 @@ class RefractionUpholeResult:
 
 
 @dataclass(frozen=True)
+class RefractionV1EstimateResult:
+    """Estimated global weathering velocity and per-group direct-arrival QC."""
+
+    mode: Literal['estimate_direct_arrival']
+    resolved_weathering_velocity_m_s: float
+    group_kind: str
+    group_key: np.ndarray
+    group_v1_m_s: np.ndarray
+    group_slope_s_per_m: np.ndarray
+    group_intercept_s: np.ndarray
+    group_n_candidates: np.ndarray
+    group_n_used: np.ndarray
+    group_offset_min_m: np.ndarray
+    group_offset_max_m: np.ndarray
+    group_residual_rms_s: np.ndarray
+    group_residual_mad_s: np.ndarray
+    group_status: np.ndarray
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RefractionManualStaticResult:
+    """Resolved manual static values matched to source and receiver endpoints."""
+
+    source_endpoint_key: np.ndarray
+    source_endpoint_id: np.ndarray | None
+    source_node_id: np.ndarray
+    source_manual_static_shift_s: np.ndarray
+    source_manual_static_status: np.ndarray
+
+    receiver_endpoint_key: np.ndarray
+    receiver_endpoint_id: np.ndarray | None
+    receiver_node_id: np.ndarray
+    receiver_manual_static_shift_s: np.ndarray
+    receiver_manual_static_status: np.ndarray
+
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class RefractionEndpointFieldCorrectionResult:
     """Endpoint-level source-depth, uphole, and manual static corrections."""
 
@@ -118,6 +158,19 @@ class RefractionEndpointFieldCorrectionResult:
     component_status: dict[RefractionFieldCorrectionComponentName, np.ndarray]
     total_field_shift_s: np.ndarray
     field_static_status: np.ndarray
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RefractionTraceFieldCorrectionResult:
+    """Trace-order field static composition result."""
+
+    source_endpoint_key_sorted: np.ndarray
+    receiver_endpoint_key_sorted: np.ndarray
+    source_field_shift_s_sorted: np.ndarray
+    receiver_field_shift_s_sorted: np.ndarray
+    trace_field_shift_s_sorted: np.ndarray
+    trace_field_static_status_sorted: np.ndarray
     qc: dict[str, Any]
 
 
@@ -176,11 +229,14 @@ __all__ = [
     'RefractionLayerKind',
     'RefractionLayerObservationMasks',
     'RefractionLayerVelocityMode',
+    'RefractionManualStaticResult',
     'RefractionSourceDepthResult',
     'RefractionSourceDepthMode',
     'RefractionSourceDepthStatus',
     'RefractionStaticInputModel',
+    'RefractionTraceFieldCorrectionResult',
     'RefractionUpholeResult',
     'RefractionUpholeStatus',
+    'RefractionV1EstimateResult',
     'ResolvedRefractionFirstLayer',
 ]
