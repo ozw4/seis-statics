@@ -55,8 +55,15 @@ def _imports_prohibited_dependency(node: ast.AST) -> bool:
         return any(_is_prohibited_module(alias.name) for alias in node.names)
 
     if isinstance(node, ast.ImportFrom):
-        return _is_prohibited_module(node.module or '') or any(
-            alias.name in PROHIBITED_IMPORT_NAMES for alias in node.names
+        module = node.module or ''
+        return (
+            _is_prohibited_module(module)
+            or any(alias.name in PROHIBITED_IMPORT_NAMES for alias in node.names)
+            or any(_is_prohibited_module(alias.name) for alias in node.names)
+            or any(
+                _is_prohibited_module(f'{module}.{alias.name}')
+                for alias in node.names
+            )
         )
 
     if isinstance(node, ast.Call):
@@ -149,6 +156,10 @@ def test_prohibited_import_collector_flags_ast_imports(tmp_path: Path) -> None:
                 'from runtime.trace_store import TraceStore',
                 'from runtime.job_runtime import run_job',
                 'from runtime.artifact_registry import ArtifactRegistry',
+                'from runtime import artifact_registry',
+                'from runtime import artifact_writer',
+                'from runtime import job_runtime',
+                'from runtime import trace_store',
                 'import sys',
                 'import importlib',
                 "sys.path.insert(0, '../seisviewer2d')",
@@ -171,8 +182,12 @@ def test_prohibited_import_collector_flags_ast_imports(tmp_path: Path) -> None:
         'seis_statics/bad.py:7',
         'seis_statics/bad.py:8',
         'seis_statics/bad.py:9',
+        'seis_statics/bad.py:10',
+        'seis_statics/bad.py:11',
         'seis_statics/bad.py:12',
         'seis_statics/bad.py:13',
-        'seis_statics/bad.py:14',
-        'seis_statics/bad.py:15',
+        'seis_statics/bad.py:16',
+        'seis_statics/bad.py:17',
+        'seis_statics/bad.py:18',
+        'seis_statics/bad.py:19',
     ]
