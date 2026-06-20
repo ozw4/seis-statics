@@ -145,6 +145,32 @@ from seis_statics.refraction.v1 import (
     estimate_global_v1_from_direct_arrivals,
 )
 
+_DESIGN_MATRIX_EXPORTS = frozenset(
+    {
+        'LOW_FOLD_NODE_REJECTION_REASON',
+        'LOW_FOLD_NODE_STATUS',
+        'OUTSIDE_REFRACTOR_CELL_GRID_REASON',
+        'RefractionDesignMatrixNodeDiagnostics',
+        'RefractionStaticDesignMatrix',
+        'RefractionStaticDesignMatrixError',
+        'build_refraction_design_matrix_node_diagnostics',
+        'build_refraction_static_cell_design_matrix',
+        'build_refraction_static_design_matrix',
+        'build_refraction_static_design_matrix_from_arrays',
+        'summarize_refraction_static_design_matrix',
+    }
+)
+
+
+def __getattr__(name: str) -> object:
+    if name in _DESIGN_MATRIX_EXPORTS:
+        from seis_statics.refraction import design_matrix
+
+        value = getattr(design_matrix, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
+
 
 __all__ = [
     'BedrockVelocityMode',
@@ -154,9 +180,12 @@ __all__ = [
     'LOCAL_V2_STATUS_VALUES',
     'LOW_FOLD_CELL_REJECTION_REASON',
     'LOW_FOLD_CELL_VELOCITY_STATUS',
+    'LOW_FOLD_NODE_REJECTION_REASON',
+    'LOW_FOLD_NODE_STATUS',
     'ManualStaticSignConvention',
     'OK_REJECTION_REASON',
     'OUTSIDE_LAYER_GATE_REJECTION_REASON',
+    'OUTSIDE_REFRACTOR_CELL_GRID_REASON',
     'REFRACTION_FIELD_CORRECTION_COMPONENT_NAMES',
     'REFRACTION_STATIC_STATUSES',
     'RefractionCellAssignment',
@@ -164,6 +193,7 @@ __all__ = [
     'RefractionCellGrid',
     'RefractionCellProjectedPoints',
     'RefractionCellProjectedSourceReceiver',
+    'RefractionDesignMatrixNodeDiagnostics',
     'RefractionEndpointTable',
     'RefractionEndpointFieldCorrectionResult',
     'RefractionFieldCorrectionComponentName',
@@ -190,6 +220,8 @@ __all__ = [
     'RefractionStaticFirstLayerOptions',
     'RefractionStaticFloatingDatumMode',
     'RefractionStaticInputModel',
+    'RefractionStaticDesignMatrix',
+    'RefractionStaticDesignMatrixError',
     'RefractionTraceFieldCorrectionResult',
     'RefractionV1EstimateResult',
     'RefractionV1EstimationError',
@@ -221,6 +253,10 @@ __all__ = [
     'assign_points_to_refraction_cells',
     'build_refraction_layer_observation_masks',
     'build_refraction_cell_grid',
+    'build_refraction_design_matrix_node_diagnostics',
+    'build_refraction_static_cell_design_matrix',
+    'build_refraction_static_design_matrix',
+    'build_refraction_static_design_matrix_from_arrays',
     'classify_refraction_endpoint_static_status',
     'compose_t1lsst_1layer_endpoint_component_rows',
     'compose_refraction_endpoint_field_corrections',
@@ -258,5 +294,6 @@ __all__ = [
     'resolve_refraction_uphole',
     'resolve_refraction_uphole_for_input_model',
     'resolved_first_layer_weathering_velocity_m_s',
+    'summarize_refraction_static_design_matrix',
     'validate_resolved_first_layer_velocity_match',
 ]

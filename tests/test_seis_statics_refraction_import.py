@@ -10,7 +10,6 @@ def test_refraction_public_api_imports_from_package_root() -> None:
         assert getattr(refraction, name) is not None
 
     prohibited_public_fragments = (
-        'DesignMatrix',
         'SolverResult',
         'WeatheringResult',
         'DatumResult',
