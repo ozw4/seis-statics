@@ -46,13 +46,21 @@ for module_name in BLOCKED_ROOTS:
 seis_statics = importlib.import_module('seis_statics')
 datum = importlib.import_module('seis_statics.datum')
 residual = importlib.import_module('seis_statics.residual')
+time_term = importlib.import_module('seis_statics.time_term')
+time_term_moveout = importlib.import_module('seis_statics.time_term.moveout')
+time_term_types = importlib.import_module('seis_statics.time_term.types')
 validation = importlib.import_module('seis_statics.validation')
 
 assert seis_statics.__name__ == 'seis_statics'
 assert datum.__name__ == 'seis_statics.datum'
 assert residual.__name__ == 'seis_statics.residual'
+assert time_term.__name__ == 'seis_statics.time_term'
+assert time_term_moveout.__name__ == 'seis_statics.time_term.moveout'
+assert time_term_types.__name__ == 'seis_statics.time_term.types'
 assert validation.__name__ == 'seis_statics.validation'
+assert callable(time_term.compute_time_term_moveout)
 assert callable(validation.coerce_1d_real_numeric_float64)
+assert 'compute_time_term_moveout' in time_term.__all__
 assert 'coerce_1d_real_numeric_float64' in validation.__all__
 """
     env = os.environ.copy()
