@@ -153,6 +153,23 @@ def test_uphole_time_qc_contains_sign_convention() -> None:
     assert result.qc['component_name'] == 'uphole_shift_s'
 
 
+def test_uphole_time_correction_from_result_uses_resolved_sign_convention() -> None:
+    resolved = resolve_refraction_uphole(
+        source_endpoint_key_sorted=_keys(['source:a']),
+        source_endpoint_id_sorted=_ids([101]),
+        source_node_id_sorted=_ids([0]),
+        uphole_time_sorted=_times([0.010]),
+        mode='header_time',
+        uphole_time_byte=95,
+        positive_time_means_delay=False,
+    )
+    result = compute_uphole_time_correction_from_result(resolved)
+
+    np.testing.assert_allclose(result.component_shift_s['uphole_shift_s'], [0.010])
+    assert result.qc['positive_time_means_delay'] is False
+    assert result.qc['uphole_shift_formula'] == 'uphole_shift_s = +uphole_time_s'
+
+
 def test_uphole_time_positive_not_delay_uses_positive_shift() -> None:
     result = compute_uphole_time_correction(
         _times([0.010]),

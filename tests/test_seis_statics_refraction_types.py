@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 from typing import get_type_hints
 
 import numpy as np
@@ -80,3 +82,28 @@ def test_refraction_public_types_do_not_expose_path_fields() -> None:
         if not hasattr(obj, '__dataclass_fields__'):
             continue
         assert all(type_hint is not Path for type_hint in get_type_hints(obj).values())
+
+
+def test_refraction_package_import_does_not_eager_import_scipy_modules() -> None:
+    code = """
+import builtins
+
+real_import = builtins.__import__
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == 'scipy' or name.startswith('scipy.'):
+        raise ImportError('scipy import blocked')
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+import seis_statics.refraction
+"""
+
+    result = subprocess.run(
+        [sys.executable, '-c', code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr

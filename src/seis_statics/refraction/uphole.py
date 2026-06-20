@@ -211,17 +211,25 @@ def compute_uphole_time_correction(
 def compute_uphole_time_correction_from_result(
     result: RefractionUpholeResult,
     *,
-    positive_time_means_delay: bool = True,
+    positive_time_means_delay: bool | None = None,
     max_abs_uphole_time_s: float | None = None,
 ) -> RefractionEndpointFieldCorrectionResult:
-    """Compute uphole field shifts from resolved endpoint uphole rows."""
+    """Compute uphole field shifts from resolved endpoint uphole rows.
+
+    When omitted, ``positive_time_means_delay`` is read from the resolver QC.
+    """
+    sign_flag = (
+        _positive_time_means_delay_from_result_qc(result.qc)
+        if positive_time_means_delay is None
+        else bool(positive_time_means_delay)
+    )
     return _compute_uphole_time_correction_for_endpoints(
         endpoint_key=result.source_endpoint_key,
         endpoint_id=result.source_endpoint_id,
         node_id=result.source_node_id,
         uphole_time_s=result.uphole_time_s,
         uphole_status=result.uphole_status,
-        positive_time_means_delay=positive_time_means_delay,
+        positive_time_means_delay=sign_flag,
         max_abs_uphole_time_s=max_abs_uphole_time_s,
     )
 
@@ -468,6 +476,15 @@ def _uphole_shift_formula(positive_time_means_delay: bool) -> str:
     if bool(positive_time_means_delay):
         return 'uphole_shift_s = -uphole_time_s'
     return 'uphole_shift_s = +uphole_time_s'
+
+
+def _positive_time_means_delay_from_result_qc(qc: dict[str, Any]) -> bool:
+    if 'positive_time_means_delay' not in qc:
+        raise ValueError('result.qc["positive_time_means_delay"] is required')
+    value = qc['positive_time_means_delay']
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError('result.qc["positive_time_means_delay"] must be boolean')
+    return bool(value)
 
 
 def _coerce_mode(value: object) -> str:

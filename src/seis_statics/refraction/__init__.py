@@ -24,11 +24,6 @@ from seis_statics.refraction.cell_grid import (
     build_refraction_cell_grid,
     compute_source_receiver_midpoints,
 )
-from seis_statics.refraction.cell_regularization import (
-    CellSlownessSmoothingRows,
-    augment_design_matrix_with_cell_smoothing,
-    build_cell_slowness_smoothing_rows,
-)
 from seis_statics.refraction.first_layer import (
     normalize_refraction_first_layer_request,
     resolve_weathering_velocity_m_s,
@@ -115,7 +110,6 @@ from seis_statics.refraction.uphole import (
 
 __all__ = [
     'BedrockVelocityMode',
-    'CellSlownessSmoothingRows',
     'ALREADY_ASSIGNED_REJECTION_REASON',
     'INVALID_OBSERVATION_REJECTION_REASON',
     'INVALID_OFFSET_REJECTION_REASON',
@@ -173,8 +167,6 @@ __all__ = [
     'ResolvedRefractionFirstLayer',
     'assign_observation_midpoint_cells',
     'assign_points_to_refraction_cells',
-    'augment_design_matrix_with_cell_smoothing',
-    'build_cell_slowness_smoothing_rows',
     'build_refraction_layer_observation_masks',
     'build_refraction_cell_grid',
     'classify_refraction_endpoint_static_status',
