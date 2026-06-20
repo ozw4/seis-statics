@@ -346,11 +346,14 @@ def test_time_term_sparse_solver_returns_estimated_trace_delay_in_sorted_order()
         TRUE_NODE_TIME_TERM_S[SOURCE_NODE_ID_SORTED]
         + TRUE_NODE_TIME_TERM_S[RECEIVER_NODE_ID_SORTED]
     )
+    expected[~result.used_trace_mask_sorted] = np.nan
     np.testing.assert_allclose(
         result.estimated_trace_time_term_delay_s_sorted,
         expected,
         atol=1.0e-9,
+        equal_nan=True,
     )
+    assert np.isnan(result.estimated_trace_time_term_delay_s_sorted[4])
 
 
 def test_time_term_sparse_solver_same_source_receiver_node_uses_two_times_node_term() -> None:

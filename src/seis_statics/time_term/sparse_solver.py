@@ -184,21 +184,26 @@ def solve_time_term_sparse_least_squares(
         name='row_estimated_time_term_delay_s',
     )
 
-    estimated_trace_delay = np.ascontiguousarray(
-        node_time_term[validated_design.source_node_id_sorted]
-        + node_time_term[validated_design.receiver_node_id_sorted],
+    used_trace_mask = validated_design.used_trace_mask_sorted
+    estimated_trace_delay = np.full(
+        validated_design.n_traces,
+        np.nan,
         dtype=np.float64,
+    )
+    estimated_trace_delay[used_trace_mask] = (
+        node_time_term[validated_design.source_node_id_sorted[used_trace_mask]]
+        + node_time_term[validated_design.receiver_node_id_sorted[used_trace_mask]]
     )
     if estimated_trace_delay.shape != (validated_design.n_traces,):
         raise ValueError('estimated_trace_time_term_delay_s_sorted shape mismatch')
     _validate_all_finite(
-        estimated_trace_delay,
-        name='estimated_trace_time_term_delay_s_sorted',
+        estimated_trace_delay[used_trace_mask],
+        name='estimated_trace_time_term_delay_s_sorted used traces',
     )
     _validate_max_abs_ms(
-        estimated_trace_delay,
+        estimated_trace_delay[used_trace_mask],
         max_abs_ms=validated_options.max_abs_estimated_trace_delay_ms,
-        name='estimated_trace_time_term_delay_s_sorted',
+        name='estimated_trace_time_term_delay_s_sorted used traces',
         limit_name='max_abs_estimated_trace_delay_ms',
     )
 
@@ -707,6 +712,10 @@ def _validate_design(design: TimeTermDesignMatrix) -> _ValidatedTimeTermDesign:
         n_unique=n_traces,
         name='design.row_trace_index_sorted',
     )
+    if not np.array_equal(row_trace_index, np.flatnonzero(used_mask)):
+        raise ValueError(
+            'design.row_trace_index_sorted must match design.used_trace_mask_sorted'
+        )
     row_source = _coerce_1d_integer_int64(
         design.row_source_node_id,
         name='design.row_source_node_id',
