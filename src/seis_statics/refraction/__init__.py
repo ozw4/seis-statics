@@ -115,6 +115,7 @@ from seis_statics.refraction.types import (
     RefractionTraceFieldCorrectionResult,
     RefractionUpholeResult,
     RefractionUpholeStatus,
+    RefractionV1EstimateResult,
     ResolvedRefractionFirstLayer,
 )
 from seis_statics.refraction.uphole import (
@@ -122,6 +123,10 @@ from seis_statics.refraction.uphole import (
     compute_uphole_time_correction_from_result,
     resolve_refraction_uphole,
     resolve_refraction_uphole_for_input_model,
+)
+from seis_statics.refraction.v1 import (
+    RefractionV1EstimationError,
+    estimate_global_v1_from_direct_arrivals,
 )
 
 
@@ -170,6 +175,8 @@ __all__ = [
     'RefractionStaticFloatingDatumMode',
     'RefractionStaticInputModel',
     'RefractionTraceFieldCorrectionResult',
+    'RefractionV1EstimateResult',
+    'RefractionV1EstimationError',
     'RefractionStaticLayerKind',
     'RefractionStaticLayerOptions',
     'RefractionStaticLayerVelocityMode',
@@ -202,6 +209,7 @@ __all__ = [
     'compute_source_receiver_midpoints',
     'compute_uphole_time_correction',
     'compute_uphole_time_correction_from_result',
+    'estimate_global_v1_from_direct_arrivals',
     'effective_refraction_cell_grid_config',
     'layer_offset_gate_contains',
     'manual_static_inline_rows',

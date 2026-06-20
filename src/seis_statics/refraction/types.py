@@ -107,6 +107,27 @@ class RefractionUpholeResult:
 
 
 @dataclass(frozen=True)
+class RefractionV1EstimateResult:
+    """Estimated global weathering velocity and per-group direct-arrival QC."""
+
+    mode: Literal['estimate_direct_arrival']
+    resolved_weathering_velocity_m_s: float
+    group_kind: str
+    group_key: np.ndarray
+    group_v1_m_s: np.ndarray
+    group_slope_s_per_m: np.ndarray
+    group_intercept_s: np.ndarray
+    group_n_candidates: np.ndarray
+    group_n_used: np.ndarray
+    group_offset_min_m: np.ndarray
+    group_offset_max_m: np.ndarray
+    group_residual_rms_s: np.ndarray
+    group_residual_mad_s: np.ndarray
+    group_status: np.ndarray
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class RefractionManualStaticResult:
     """Resolved manual static values matched to source and receiver endpoints."""
 
@@ -216,5 +237,6 @@ __all__ = [
     'RefractionTraceFieldCorrectionResult',
     'RefractionUpholeResult',
     'RefractionUpholeStatus',
+    'RefractionV1EstimateResult',
     'ResolvedRefractionFirstLayer',
 ]
