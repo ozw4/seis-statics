@@ -402,6 +402,69 @@ def test_refraction_solver_robust_safe_rejection_deduplicates_same_node_rows() -
     np.testing.assert_array_equal(result.node_observation_count, [2])
 
 
+def test_refraction_solver_robust_safe_rejection_preserves_graph_connectivity() -> None:
+    fixed_velocity = 2500.0
+    source_node_id = np.asarray([10, 10, 20, 20, 20], dtype=np.int64)
+    receiver_node_id = np.asarray([30, 30, 40, 40, 30], dtype=np.int64)
+    distance_m = np.asarray([500.0, 600.0, 500.0, 600.0, 700.0])
+    valid_mask = np.ones(5, dtype=bool)
+    true_t1_by_node = {
+        10: 0.02,
+        20: 0.04,
+        30: 0.03,
+        40: 0.05,
+    }
+    pick_time = np.asarray(
+        [
+            true_t1_by_node[int(src)]
+            + true_t1_by_node[int(rec)]
+            + dist / fixed_velocity
+            for src, rec, dist in zip(
+                source_node_id,
+                receiver_node_id,
+                distance_m,
+                strict=True,
+            )
+        ],
+        dtype=np.float64,
+    )
+    pick_time[4] += 0.12
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=1,
+        n_traces=5,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(
+            min_picks_per_node=1,
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=1.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            ),
+        ),
+    )
+
+    assert result.robust_stop_reason == 'safe_rejection'
+    assert result.n_rejected_observations == 0
+    np.testing.assert_array_equal(result.used_observation_mask_sorted, valid_mask)
+    assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 0
+
+
 def test_refraction_solver_rejects_mismatched_design_model_modes() -> None:
     source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
         _known_global_arrays()

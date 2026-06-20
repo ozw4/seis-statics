@@ -1043,6 +1043,10 @@ def _safe_rejection_rows(
     min_used_observations: int,
 ) -> np.ndarray:
     proposed = np.ascontiguousarray(current_row_mask.copy(), dtype=bool)
+    initial_component_count = _source_receiver_graph_component_count(
+        design,
+        row_used_mask=initial_row_mask,
+    )
     accepted: list[int] = []
     for raw_row in candidate_rows.tolist():
         row = int(raw_row)
@@ -1054,6 +1058,7 @@ def _safe_rejection_rows(
             model=model,
             initial_row_mask=initial_row_mask,
             row_used_mask=trial,
+            initial_source_receiver_component_count=initial_component_count,
             min_used_fraction=min_used_fraction,
             min_used_observations=min_used_observations,
         ):
@@ -1070,6 +1075,7 @@ def _robust_row_mask_is_safe(
     model: Any,
     initial_row_mask: np.ndarray,
     row_used_mask: np.ndarray,
+    initial_source_receiver_component_count: int,
     min_used_fraction: float,
     min_used_observations: int,
 ) -> bool:
@@ -1088,6 +1094,14 @@ def _robust_row_mask_is_safe(
     ):
         return False
     if not _node_coverage_is_safe(design, row_used_mask=row_used_mask):
+        return False
+    if (
+        _source_receiver_graph_component_count(
+            design,
+            row_used_mask=row_used_mask,
+        )
+        != int(initial_source_receiver_component_count)
+    ):
         return False
     if design.bedrock_velocity_mode == 'solve_cell':
         return _cell_coverage_is_safe(
@@ -1147,6 +1161,53 @@ def _cell_coverage_is_safe(
         minlength=int(design.n_total_cells),
     ).astype(np.int64, copy=False)
     return bool(np.all(counts[design.active_cell_id] >= min_observations))
+
+
+def _source_receiver_graph_component_count(
+    design: RefractionStaticDesignMatrix,
+    *,
+    row_used_mask: np.ndarray,
+) -> int:
+    mask = _coerce_design_row_mask(design, row_used_mask=row_used_mask)
+    n_nodes = int(design.n_active_nodes)
+    if n_nodes <= 0:
+        return 0
+
+    parent = np.arange(n_nodes, dtype=np.int64)
+    rank = np.zeros(n_nodes, dtype=np.int8)
+
+    def find(node: int) -> int:
+        root = node
+        while int(parent[root]) != root:
+            root = int(parent[root])
+        while int(parent[node]) != node:
+            next_node = int(parent[node])
+            parent[node] = root
+            node = next_node
+        return root
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        if rank[left_root] < rank[right_root]:
+            parent[left_root] = right_root
+        elif rank[left_root] > rank[right_root]:
+            parent[right_root] = left_root
+        else:
+            parent[right_root] = left_root
+            rank[left_root] += 1
+
+    row_indices = np.flatnonzero(mask)
+    for source_col, receiver_col in zip(
+        design.source_node_col[row_indices],
+        design.receiver_node_col[row_indices],
+        strict=True,
+    ):
+        union(int(source_col), int(receiver_col))
+
+    return len({find(node) for node in range(n_nodes)})
 
 
 def _robust_center_scale(
