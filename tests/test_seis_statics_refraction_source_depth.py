@@ -56,6 +56,26 @@ def test_source_depth_marks_missing_when_required() -> None:
     assert result.source_depth_pick_count.tolist() == [0]
 
 
+def test_source_depth_none_mode_does_not_status_unused_values() -> None:
+    result = resolve_refraction_source_depth(
+        source_endpoint_key_sorted=_keys(
+            ['source:invalid', 'source:large', 'source:wide', 'source:wide']
+        ),
+        source_endpoint_id_sorted=_ids([101, 102, 103, 103]),
+        source_node_id_sorted=_ids([0, 1, 2, 2]),
+        source_depth_m_sorted=_depths([-1.0, 101.0, 1.0, 2.0]),
+        mode='none',
+        source_depth_byte=115,
+        max_abs_source_depth_m=100.0,
+        inconsistency_tolerance_m=0.1,
+    )
+
+    assert result.source_depth_status.tolist() == ['ok', 'ok', 'ok']
+    assert result.qc['n_invalid_source_depth'] == 0
+    assert result.qc['n_inconsistent_source_depth'] == 0
+    assert result.qc['n_exceeds_max_abs_source_depth'] == 0
+
+
 def test_source_depth_marks_missing_trace_with_resolved_endpoint_depth() -> None:
     result = resolve_refraction_source_depth(
         source_endpoint_key_sorted=_keys(['source:a', 'source:a']),

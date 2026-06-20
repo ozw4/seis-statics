@@ -49,11 +49,6 @@ def resolve_refraction_uphole_for_input_model(
     inconsistency_tolerance_s: float = _DEFAULT_INCONSISTENCY_TOLERANCE_S,
 ) -> RefractionUpholeResult:
     """Resolve trace-order uphole times to source endpoint rows."""
-    if input_model.source_endpoint_id_sorted is None:
-        raise ValueError(
-            'input_model.source_endpoint_id_sorted is required for uphole '
-            'resolution'
-        )
     return resolve_refraction_uphole(
         source_endpoint_key_sorted=input_model.source_endpoint_key_sorted,
         source_endpoint_id_sorted=input_model.source_endpoint_id_sorted,
@@ -407,18 +402,20 @@ def _uphole_status(
     max_abs_uphole_time_s: float,
     inconsistency_tolerance_s: float,
 ) -> str:
+    if not uphole_required:
+        return 'ok'
     if node_id < 0:
         return 'inactive_source_endpoint'
     if not uphole_array_present:
-        return 'missing_uphole_time' if uphole_required else 'ok'
+        return 'missing_uphole_time'
 
     nonfinite_invalid = np.isinf(values)
     if bool(np.any(nonfinite_invalid)):
         return 'invalid_uphole_time'
-    if uphole_required and bool(np.any(np.isnan(values))):
+    if bool(np.any(np.isnan(values))):
         return 'missing_uphole_time'
     if valid_values.size == 0:
-        return 'missing_uphole_time' if uphole_required else 'ok'
+        return 'missing_uphole_time'
     if bool(np.any(np.abs(valid_values) > max_abs_uphole_time_s)):
         return 'exceeds_max_abs_uphole_time'
     if (

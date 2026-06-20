@@ -12,7 +12,11 @@ from seis_statics.refraction import (
     RefractionLayerObservationMasks,
     RefractionStaticInputModel,
 )
+from seis_statics.refraction.source_depth import (
+    resolve_refraction_source_depth_for_input_model,
+)
 from seis_statics.refraction import types as refraction_types
+from seis_statics.refraction.uphole import resolve_refraction_uphole_for_input_model
 
 
 def test_refraction_types_construct_shared_input_model_without_path_containers() -> None:
@@ -74,6 +78,22 @@ def test_refraction_types_construct_shared_input_model_without_path_containers()
     assert model.endpoint_table is endpoint_table
     assert model.layer_observation_masks is layer_masks
     assert model.source_depth_m_sorted is None
+
+    source_depth = resolve_refraction_source_depth_for_input_model(
+        input_model=model,
+        mode='none',
+        source_depth_byte=None,
+    )
+    uphole = resolve_refraction_uphole_for_input_model(
+        input_model=model,
+        uphole_time_sorted=np.array([np.nan, np.inf]),
+        mode='none',
+        uphole_time_byte=None,
+    )
+    np.testing.assert_array_equal(source_depth.source_endpoint_id, [0])
+    np.testing.assert_array_equal(uphole.source_endpoint_id, [0])
+    assert source_depth.source_depth_status.tolist() == ['ok']
+    assert uphole.uphole_status.tolist() == ['ok']
 
 
 def test_refraction_public_types_do_not_expose_path_fields() -> None:

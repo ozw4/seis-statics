@@ -48,11 +48,6 @@ def resolve_refraction_source_depth_for_input_model(
     inconsistency_tolerance_m: float = _DEFAULT_INCONSISTENCY_TOLERANCE_M,
 ) -> RefractionSourceDepthResult:
     """Resolve trace-order source depths to source endpoint rows."""
-    if input_model.source_endpoint_id_sorted is None:
-        raise ValueError(
-            'input_model.source_endpoint_id_sorted is required for source-depth '
-            'resolution'
-        )
     return resolve_refraction_source_depth(
         source_endpoint_key_sorted=input_model.source_endpoint_key_sorted,
         source_endpoint_id_sorted=input_model.source_endpoint_id_sorted,
@@ -394,20 +389,22 @@ def _source_depth_status(
     max_abs_source_depth_m: float,
     inconsistency_tolerance_m: float,
 ) -> str:
+    if not depth_required:
+        return 'ok'
     if node_id < 0:
         return 'inactive_source_endpoint'
     if not depth_array_present:
-        return 'missing_source_depth' if depth_required else 'ok'
+        return 'missing_source_depth'
 
     finite = np.isfinite(values)
     nonfinite_invalid = np.isinf(values)
     negative = finite & (values < 0.0)
     if bool(np.any(nonfinite_invalid | negative)):
         return 'invalid_source_depth'
-    if depth_required and bool(np.any(np.isnan(values))):
+    if bool(np.any(np.isnan(values))):
         return 'missing_source_depth'
     if valid_values.size == 0:
-        return 'missing_source_depth' if depth_required else 'ok'
+        return 'missing_source_depth'
     if bool(np.any(np.abs(valid_values) > max_abs_source_depth_m)):
         return 'exceeds_max_abs_source_depth'
     if (

@@ -38,6 +38,26 @@ def test_uphole_header_time_loads_seconds() -> None:
     assert result.qc['uphole_time_unit'] == 's'
 
 
+def test_uphole_none_mode_does_not_status_unused_values() -> None:
+    result = resolve_refraction_uphole(
+        source_endpoint_key_sorted=_keys(
+            ['source:invalid', 'source:large', 'source:wide', 'source:wide']
+        ),
+        source_endpoint_id_sorted=_ids([101, 102, 103, 103]),
+        source_node_id_sorted=_ids([0, 1, 2, 2]),
+        uphole_time_sorted=_times([np.inf, 1.5, 0.010, 0.020]),
+        mode='none',
+        uphole_time_byte=95,
+        max_abs_uphole_time_s=1.0,
+        inconsistency_tolerance_s=0.001,
+    )
+
+    assert result.uphole_status.tolist() == ['ok', 'ok', 'ok']
+    assert result.qc['n_invalid_uphole'] == 0
+    assert result.qc['n_inconsistent_uphole'] == 0
+    assert result.qc['n_exceeds_max_abs_uphole'] == 0
+
+
 def test_uphole_header_time_loads_milliseconds() -> None:
     result = resolve_refraction_uphole(
         source_endpoint_key_sorted=_keys(['source:a', 'source:b']),
