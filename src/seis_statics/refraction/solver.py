@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 import numpy as np
 from scipy import optimize, sparse
-from scipy.sparse.csgraph import structural_rank
+from scipy.sparse import linalg as sparse_linalg
 
 from seis_statics._validation import (
     coerce_1d_integer_int64 as _common_coerce_1d_integer_int64,
@@ -55,6 +55,23 @@ _coerce_1d_integer_int64 = partial(
 
 
 @dataclass(frozen=True)
+class _NumericalRankDiagnostic:
+    """Column-scaled numerical rank summary for an identifiability check."""
+
+    method: str
+    n_rows: int
+    n_columns: int
+    expected_rank: int
+    estimated_rank: int
+    expected_nullity: int
+    gauge_nullity: int
+    threshold: float
+    critical_singular_value: float
+    largest_singular_value: float
+    rtol: float
+
+
+@dataclass(frozen=True)
 class RefractionStaticSolveSystem:
     """Augmented bounded linear system used by the refraction solver."""
 
@@ -86,6 +103,7 @@ class RefractionStaticSolveSystem:
     slowness_upper_bound_s_per_m: float | None
     initial_bedrock_slowness_s_per_m: float | None
     smoothing_rows: CellSlownessSmoothingRows | None
+    identifiability: _NumericalRankDiagnostic
 
 
 RefractionStaticRobustStopReason = Literal[
@@ -248,6 +266,7 @@ def build_refraction_static_solver_system(
         damping_matrix=damping_matrix,
         damping_rhs=damping_rhs,
         half_intercept_damping_lambda=options.half_intercept_damping_lambda,
+        identifiability_rtol=options.identifiability_rtol,
         node_lower_bound_s=0.0,
         node_upper_bound_s=float(node_upper),
         slowness_lower_bound_s_per_m=slowness_lower,
@@ -267,6 +286,7 @@ def _build_refraction_static_solver_system_from_parts(
     damping_matrix: sparse.csr_matrix,
     damping_rhs: np.ndarray,
     half_intercept_damping_lambda: float,
+    identifiability_rtol: float,
     node_lower_bound_s: float,
     node_upper_bound_s: float,
     slowness_lower_bound_s_per_m: float | None,
@@ -299,6 +319,19 @@ def _build_refraction_static_solver_system_from_parts(
     )
     smoothing_rhs = (
         smoothing_rows.rhs_s if smoothing_rows is not None else np.empty(0)
+    )
+    physical_matrix = sparse.vstack(
+        [observation_matrix, smoothing_matrix],
+        format='csr',
+        dtype=np.float64,
+    )
+    physical_matrix.sort_indices()
+    identifiability = _validate_physical_identifiability(
+        physical_matrix,
+        mode=design.bedrock_velocity_mode,
+        n_parameters=n_parameters,
+        gauge_nullity=int(np.count_nonzero(graph.gauge_required_by_component)),
+        rtol=float(identifiability_rtol),
     )
 
     augmented_matrix = sparse.vstack(
@@ -364,6 +397,7 @@ def _build_refraction_static_solver_system_from_parts(
         slowness_upper_bound_s_per_m=slowness_upper_bound_s_per_m,
         initial_bedrock_slowness_s_per_m=initial_bedrock_slowness_s_per_m,
         smoothing_rows=smoothing_rows,
+        identifiability=identifiability,
     )
 
 
@@ -388,6 +422,7 @@ def _rebuild_refraction_static_solver_system_for_row_mask(
         damping_matrix=damping_matrix,
         damping_rhs=damping_rhs,
         half_intercept_damping_lambda=system.half_intercept_damping_lambda,
+        identifiability_rtol=system.identifiability.rtol,
         node_lower_bound_s=system.node_lower_bound_s,
         node_upper_bound_s=system.node_upper_bound_s,
         slowness_lower_bound_s_per_m=system.slowness_lower_bound_s_per_m,
@@ -635,6 +670,11 @@ def validate_refraction_static_solver_options(
             name='solver.max_abs_half_intercept_time_ms',
             error_type=RefractionStaticSolverError,
         ),
+        identifiability_rtol=_coerce_positive_finite_float(
+            opts.identifiability_rtol,
+            name='solver.identifiability_rtol',
+            error_type=RefractionStaticSolverError,
+        ),
         robust=robust_options,
     )
 
@@ -826,6 +866,215 @@ def _build_cell_smoothing_rows_for_design(
 
 def _empty_rows(n_parameters: int) -> sparse.csr_matrix:
     return sparse.csr_matrix((0, n_parameters), dtype=np.float64)
+
+
+_DENSE_IDENTIFIABILITY_MAX_ELEMENTS = 1_000_000
+
+
+def _validate_physical_identifiability(
+    matrix: sparse.csr_matrix,
+    *,
+    mode: str,
+    n_parameters: int,
+    gauge_nullity: int,
+    rtol: float,
+) -> _NumericalRankDiagnostic:
+    if matrix.shape[1] != n_parameters:
+        raise RefractionStaticSolverError('physical identifiability matrix shape mismatch')
+    expected_rank = int(n_parameters) - int(gauge_nullity)
+    if expected_rank < 0:
+        raise RefractionStaticSolverError(
+            f'{mode} physical system has invalid gauge nullity: '
+            f'n_parameters={n_parameters}, gauge_nullity={gauge_nullity}'
+        )
+    diagnostic = _column_scaled_numerical_rank(
+        matrix,
+        expected_rank=expected_rank,
+        expected_nullity=int(gauge_nullity),
+        rtol=rtol,
+    )
+    if diagnostic.estimated_rank != diagnostic.expected_rank:
+        raise RefractionStaticSolverError(
+            f'{mode} physical system is not identifiable: '
+            f'expected_rank={diagnostic.expected_rank}, '
+            f'actual_rank={diagnostic.estimated_rank}, '
+            f'gauge_nullity={diagnostic.gauge_nullity}, '
+            f'expected_nullity={diagnostic.expected_nullity}, '
+            f'threshold={diagnostic.threshold:.6g}, '
+            f'critical_singular_value={diagnostic.critical_singular_value:.6g}'
+        )
+    return diagnostic
+
+
+def _column_scaled_numerical_rank(
+    matrix: sparse.spmatrix,
+    *,
+    expected_rank: int,
+    expected_nullity: int,
+    rtol: float,
+) -> _NumericalRankDiagnostic:
+    if expected_rank < 0:
+        raise RefractionStaticSolverError('expected_rank must be nonnegative')
+    if expected_nullity < 0:
+        raise RefractionStaticSolverError('expected_nullity must be nonnegative')
+    if not np.isfinite(rtol) or rtol <= 0.0:
+        raise RefractionStaticSolverError('solver.identifiability_rtol must be positive finite')
+    csr = matrix.tocsr().astype(np.float64, copy=False)
+    _validate_finite(csr.data, name='physical_matrix.data')
+    n_rows, n_columns = map(int, csr.shape)
+    if expected_rank > min(n_rows, n_columns):
+        return _NumericalRankDiagnostic(
+            method='row_count',
+            n_rows=n_rows,
+            n_columns=n_columns,
+            expected_rank=int(expected_rank),
+            estimated_rank=int(min(n_rows, n_columns)),
+            expected_nullity=int(expected_nullity),
+            gauge_nullity=int(expected_nullity),
+            threshold=0.0,
+            critical_singular_value=0.0,
+            largest_singular_value=0.0,
+            rtol=float(rtol),
+        )
+    scaled = _column_l2_scaled_matrix(csr)
+    if n_rows * n_columns <= _DENSE_IDENTIFIABILITY_MAX_ELEMENTS:
+        return _dense_column_scaled_numerical_rank(
+            scaled,
+            expected_rank=expected_rank,
+            expected_nullity=expected_nullity,
+            rtol=rtol,
+        )
+    return _sparse_column_scaled_numerical_rank(
+        scaled,
+        expected_rank=expected_rank,
+        expected_nullity=expected_nullity,
+        rtol=rtol,
+    )
+
+
+def _column_l2_scaled_matrix(matrix: sparse.csr_matrix) -> sparse.csr_matrix:
+    column_norm = np.sqrt(
+        np.asarray(matrix.power(2).sum(axis=0), dtype=np.float64).ravel()
+    )
+    _validate_finite(column_norm, name='physical_matrix column norms')
+    scale = np.zeros(column_norm.shape, dtype=np.float64)
+    nonzero = column_norm > 0.0
+    scale[nonzero] = 1.0 / column_norm[nonzero]
+    scaled = matrix @ sparse.diags(scale, offsets=0, format='csr')
+    scaled.sort_indices()
+    return scaled
+
+
+def _dense_column_scaled_numerical_rank(
+    scaled_matrix: sparse.csr_matrix,
+    *,
+    expected_rank: int,
+    expected_nullity: int,
+    rtol: float,
+) -> _NumericalRankDiagnostic:
+    dense = scaled_matrix.toarray()
+    singular_values = np.linalg.svd(dense, compute_uv=False)
+    singular_values = np.asarray(singular_values, dtype=np.float64)
+    largest = float(singular_values[0]) if singular_values.size else 0.0
+    threshold = float(rtol) * largest
+    estimated_rank = int(np.count_nonzero(singular_values > threshold))
+    critical = (
+        float(singular_values[expected_rank - 1])
+        if expected_rank > 0 and singular_values.size >= expected_rank
+        else 0.0
+    )
+    return _NumericalRankDiagnostic(
+        method='dense_svd',
+        n_rows=int(scaled_matrix.shape[0]),
+        n_columns=int(scaled_matrix.shape[1]),
+        expected_rank=int(expected_rank),
+        estimated_rank=estimated_rank,
+        expected_nullity=int(expected_nullity),
+        gauge_nullity=int(expected_nullity),
+        threshold=threshold,
+        critical_singular_value=critical,
+        largest_singular_value=largest,
+        rtol=float(rtol),
+    )
+
+
+def _sparse_column_scaled_numerical_rank(
+    scaled_matrix: sparse.csr_matrix,
+    *,
+    expected_rank: int,
+    expected_nullity: int,
+    rtol: float,
+) -> _NumericalRankDiagnostic:
+    n_rows, n_columns = map(int, scaled_matrix.shape)
+    min_dim = min(n_rows, n_columns)
+    if min_dim == 0:
+        largest = 0.0
+        threshold = 0.0
+        estimated_rank = 0
+        critical = 0.0
+    else:
+        try:
+            largest_values = sparse_linalg.svds(
+                scaled_matrix,
+                k=1,
+                which='LM',
+                return_singular_vectors=False,
+            )
+        except Exception as exc:  # pragma: no cover - exercised by direct helper tests
+            raise RefractionStaticSolverError(
+                'sparse physical identifiability largest singular value did not converge'
+            ) from exc
+        largest = float(np.max(np.abs(largest_values)))
+        threshold = float(rtol) * largest
+        if expected_rank == 0:
+            critical = 0.0
+            estimated_rank = int(largest > threshold)
+        else:
+            critical_index = min_dim - int(expected_rank)
+            if critical_index < 0:
+                critical = 0.0
+                estimated_rank = min_dim
+            else:
+                k_small = critical_index + 1
+                if k_small >= min_dim:
+                    raise RefractionStaticSolverError(
+                        'sparse physical identifiability requires too many '
+                        'singular values for the sparse path'
+                    )
+                try:
+                    small_values = sparse_linalg.svds(
+                        scaled_matrix,
+                        k=k_small,
+                        which='SM',
+                        return_singular_vectors=False,
+                    )
+                except Exception as exc:
+                    raise RefractionStaticSolverError(
+                        'sparse physical identifiability smallest singular values '
+                        'did not converge'
+                    ) from exc
+                small_values = np.sort(np.asarray(small_values, dtype=np.float64))
+                _validate_finite(small_values, name='physical_matrix sparse singular values')
+                critical = float(small_values[critical_index])
+                estimated_nullity = (n_columns - min_dim) + int(
+                    np.count_nonzero(small_values <= threshold)
+                )
+                estimated_rank = int(n_columns - estimated_nullity)
+                if critical > threshold:
+                    estimated_rank = int(expected_rank)
+    return _NumericalRankDiagnostic(
+        method='sparse_svds',
+        n_rows=n_rows,
+        n_columns=n_columns,
+        expected_rank=int(expected_rank),
+        estimated_rank=int(estimated_rank),
+        expected_nullity=int(expected_nullity),
+        gauge_nullity=int(expected_nullity),
+        threshold=float(threshold),
+        critical_singular_value=float(critical),
+        largest_singular_value=float(largest),
+        rtol=float(rtol),
+    )
 
 
 def _build_damping_system(
@@ -1124,28 +1373,10 @@ def _robust_row_mask_is_safe(
         )
     except RefractionStaticSolverError:
         return False
-    if candidate_system.n_augmented_rows < candidate_system.n_parameters:
-        return False
-    return _augmented_system_is_structurally_identifiable(candidate_system)
-
-
-def _augmented_system_is_structurally_identifiable(
-    system: RefractionStaticSolveSystem,
-) -> bool:
-    matrix = system.augmented_matrix
-    if matrix.shape != (system.n_augmented_rows, system.n_parameters):
-        return False
-    try:
-        _validate_bounds(
-            lower_bounds=system.lower_bounds,
-            upper_bounds=system.upper_bounds,
-        )
-    except RefractionStaticSolverError:
-        return False
-    column_nnz = np.diff(matrix.tocsc().indptr)
-    if np.any(column_nnz == 0):
-        return False
-    return bool(int(structural_rank(matrix)) == int(system.n_parameters))
+    return bool(
+        candidate_system.identifiability.estimated_rank
+        == candidate_system.identifiability.expected_rank
+    )
 
 
 def _node_coverage_is_safe(
@@ -1723,6 +1954,9 @@ def _build_solver_qc(
         'solver_optimality': float(result.optimality),
         'solver_iterations': int(result.nit),
         'rms_residual_ms': float(rms_residual_s * 1000.0),
+        'physical_identifiability': _identifiability_diagnostic_json(
+            system.identifiability
+        ),
         'robust_enabled': bool(
             robust_result.stop_reason != 'disabled'
             or len(robust_result.iteration_summaries) > 0
@@ -1755,6 +1989,24 @@ def _build_solver_qc(
             )
         }
     return qc
+
+
+def _identifiability_diagnostic_json(
+    diagnostic: _NumericalRankDiagnostic,
+) -> dict[str, Any]:
+    return {
+        'method': diagnostic.method,
+        'n_rows': int(diagnostic.n_rows),
+        'n_columns': int(diagnostic.n_columns),
+        'expected_rank': int(diagnostic.expected_rank),
+        'estimated_numerical_rank': int(diagnostic.estimated_rank),
+        'expected_nullity': int(diagnostic.expected_nullity),
+        'gauge_nullity': int(diagnostic.gauge_nullity),
+        'threshold': float(diagnostic.threshold),
+        'critical_singular_value': float(diagnostic.critical_singular_value),
+        'largest_singular_value': float(diagnostic.largest_singular_value),
+        'rtol': float(diagnostic.rtol),
+    }
 
 
 def _solver_design_qc(

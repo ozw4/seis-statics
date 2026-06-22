@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from seis_statics.refraction import (
     LOW_FOLD_CELL_VELOCITY_STATUS,
@@ -11,6 +12,7 @@ from seis_statics.refraction import (
     RefractionStaticModelOptions,
     RefractionStaticRefractorCellOptions,
     RefractionStaticRobustOptions,
+    RefractionStaticSolverError,
     RefractionStaticSolverOptions,
     build_refraction_static_design_matrix_from_arrays,
     build_refraction_static_solver_system,
@@ -303,6 +305,69 @@ def test_refraction_cell_solver_smoothing_pulls_neighbor_slowness_together() -> 
     assert smoothed.system.smoothing_rows is not None
     assert smoothed.system.smoothing_rows.reference_distance_m == 700.0
     assert smoothed.qc['cell_smoothing']['n_cell_smoothing_edges'] == 1
+
+
+def test_refraction_cell_solver_rejects_unanchored_smoothing_system() -> None:
+    distance_m = np.asarray([500.0, 500.0], dtype=np.float64)
+    pick_time = 0.07 + distance_m / 2500.0
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(2, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 10], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([20, 20], dtype=np.int64),
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20], dtype=np.int64),
+        bedrock_velocity_mode='solve_cell',
+        midpoint_cell_id_sorted=np.asarray([0, 1], dtype=np.int64),
+        n_total_cells=2,
+        number_of_cell_x=2,
+        number_of_cell_y=1,
+        cell_assignment_mode='midpoint',
+        min_observations_per_cell=1,
+        n_traces=2,
+    )
+
+    with pytest.raises(RefractionStaticSolverError, match='solve_cell.*actual_rank=2'):
+        solve_refraction_static_design_least_squares(
+            design,
+            model=_cell_model(smoothing_weight=1.0),
+            solver_options=_solver_options(),
+        )
+
+
+def test_refraction_cell_solver_smoothing_with_absolute_anchor_solves() -> None:
+    distance_m = np.asarray([500.0, 700.0], dtype=np.float64)
+    pick_time = 0.07 + distance_m / 2500.0
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(2, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 10], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([20, 20], dtype=np.int64),
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20], dtype=np.int64),
+        bedrock_velocity_mode='solve_cell',
+        midpoint_cell_id_sorted=np.asarray([0, 1], dtype=np.int64),
+        n_total_cells=2,
+        number_of_cell_x=2,
+        number_of_cell_y=1,
+        cell_assignment_mode='midpoint',
+        min_observations_per_cell=1,
+        n_traces=2,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_cell_model(smoothing_weight=1.0),
+        solver_options=_solver_options(),
+    )
+
+    np.testing.assert_allclose(
+        result.cell_bedrock_velocity_m_s,
+        [2500.0, 2500.0],
+        atol=1.0e-6,
+    )
+    assert result.system.identifiability.expected_rank == 3
+    assert result.system.identifiability.estimated_rank == 3
 
 
 def test_refraction_cell_solver_marks_low_fold_and_inactive_cells() -> None:

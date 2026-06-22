@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy import sparse
 
 from seis_statics.refraction import (
     RefractionStaticModelOptions,
@@ -12,6 +13,8 @@ from seis_statics.refraction import (
     build_refraction_static_design_matrix_from_arrays,
     solve_refraction_static_design_least_squares,
 )
+import seis_statics.refraction.solver as solver_module
+from seis_statics.refraction.solver import _column_scaled_numerical_rank
 
 
 def _solver_options(**overrides: object) -> RefractionStaticSolverOptions:
@@ -118,6 +121,204 @@ def test_refraction_solver_solve_global_matches_known_parameters_and_residual() 
     assert result.qc['n_bipartite_node_components'] == 1
     assert result.qc['n_gauge_required_node_components'] == 1
     assert result.qc['solver_name'] == 'lsq_linear'
+    assert result.qc['physical_identifiability']['expected_rank'] == 4
+    assert result.qc['physical_identifiability']['estimated_numerical_rank'] == 4
+
+
+def test_refraction_solver_rejects_global_slowness_underdetermined() -> None:
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=np.asarray([0.25], dtype=np.float64),
+        valid_observation_mask_sorted=np.asarray([True]),
+        source_node_id_sorted=np.asarray([10], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([20], dtype=np.int64),
+        distance_m_sorted=np.asarray([500.0], dtype=np.float64),
+        node_id=np.asarray([10, 20], dtype=np.int64),
+        bedrock_velocity_mode='solve_global',
+        n_traces=1,
+    )
+
+    with pytest.raises(
+        RefractionStaticSolverError,
+        match='solve_global.*expected_rank=2.*actual_rank=1.*gauge_nullity=1',
+    ):
+        solve_refraction_static_design_least_squares(
+            design,
+            model=_model(mode='solve_global'),
+            solver_options=_solver_options(),
+        )
+
+
+def test_refraction_solver_global_slowness_identified_by_distance_variation() -> None:
+    true_sum_t1 = 0.07
+    true_velocity = 2500.0
+    distance_m = np.asarray([500.0, 700.0], dtype=np.float64)
+    pick_time = true_sum_t1 + distance_m / true_velocity
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(2, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 10], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([20, 20], dtype=np.int64),
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20], dtype=np.int64),
+        bedrock_velocity_mode='solve_global',
+        n_traces=2,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(),
+    )
+
+    assert result.bedrock_velocity_m_s == pytest.approx(true_velocity, abs=1.0e-6)
+    assert result.system.identifiability.expected_rank == 2
+    assert result.system.identifiability.estimated_rank == 2
+
+
+def test_refraction_solver_rejects_duplicate_rows_missed_by_pattern_rank() -> None:
+    distance_m = np.asarray([500.0, 500.0], dtype=np.float64)
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=np.asarray([0.27, 0.27], dtype=np.float64),
+        valid_observation_mask_sorted=np.ones(2, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 10], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([20, 20], dtype=np.int64),
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20], dtype=np.int64),
+        bedrock_velocity_mode='solve_global',
+        n_traces=2,
+    )
+
+    with pytest.raises(RefractionStaticSolverError, match='actual_rank=1'):
+        solve_refraction_static_design_least_squares(
+            design,
+            model=_model(mode='solve_global'),
+            solver_options=_solver_options(),
+        )
+
+
+def test_refraction_solver_damping_does_not_identify_global_slowness() -> None:
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=np.asarray([0.25], dtype=np.float64),
+        valid_observation_mask_sorted=np.asarray([True]),
+        source_node_id_sorted=np.asarray([10], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([20], dtype=np.int64),
+        distance_m_sorted=np.asarray([500.0], dtype=np.float64),
+        node_id=np.asarray([10, 20], dtype=np.int64),
+        bedrock_velocity_mode='solve_global',
+        n_traces=1,
+    )
+
+    with pytest.raises(RefractionStaticSolverError, match='physical system is not identifiable'):
+        solve_refraction_static_design_least_squares(
+            design,
+            model=_model(mode='solve_global'),
+            solver_options=_solver_options(half_intercept_damping_lambda=100.0),
+        )
+
+
+def test_refraction_solver_robust_rejection_refuses_slowness_rank_loss() -> None:
+    true_sum_t1 = 0.07
+    distance_m = np.asarray([500.0, 700.0], dtype=np.float64)
+    pick_time = true_sum_t1 + distance_m / 2500.0
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(2, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 10], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([20, 20], dtype=np.int64),
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20], dtype=np.int64),
+        bedrock_velocity_mode='solve_global',
+        n_traces=2,
+    )
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(),
+    )
+    from seis_statics.refraction.solver import _robust_row_mask_is_safe
+
+    assert not _robust_row_mask_is_safe(
+        design=design,
+        system=system,
+        initial_row_mask=np.ones(2, dtype=bool),
+        row_used_mask=np.asarray([True, False], dtype=bool),
+        min_used_fraction=0.5,
+        min_used_observations=1,
+    )
+
+
+def test_refraction_solver_identifiability_rank_is_column_scale_stable() -> None:
+    base_array = np.asarray(
+        [
+            [1.0, 0.0, 1.0e-6],
+            [0.0, 1.0, 2.0e-6],
+            [1.0, 1.0, 4.0e-6],
+        ],
+        dtype=np.float64,
+    )
+    rescaled_array = base_array.copy()
+    rescaled_array[:, 2] *= 1.0e12
+
+    base_rank = _column_scaled_numerical_rank(
+        sparse.csr_matrix(base_array),
+        expected_rank=3,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+    rescaled_rank = _column_scaled_numerical_rank(
+        sparse.csr_matrix(rescaled_array),
+        expected_rank=3,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert base_rank.estimated_rank == 3
+    assert rescaled_rank.estimated_rank == 3
+
+
+def test_refraction_solver_large_sparse_skinny_rank_uses_sparse_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matrix = sparse.eye(512, 2000, format='csr', dtype=np.float64)
+    seen_shape: list[tuple[int, int]] = []
+
+    def fail_dense(*args: object, **kwargs: object) -> object:
+        raise AssertionError('large sparse identifiability matrix was densified')
+
+    def fake_sparse(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        expected_rank: int,
+        expected_nullity: int,
+        rtol: float,
+    ) -> solver_module._NumericalRankDiagnostic:
+        seen_shape.append(tuple(map(int, scaled_matrix.shape)))
+        return solver_module._NumericalRankDiagnostic(
+            method='sparse_svds',
+            n_rows=int(scaled_matrix.shape[0]),
+            n_columns=int(scaled_matrix.shape[1]),
+            expected_rank=int(expected_rank),
+            estimated_rank=int(expected_rank),
+            expected_nullity=int(expected_nullity),
+            gauge_nullity=int(expected_nullity),
+            threshold=float(rtol),
+            critical_singular_value=1.0,
+            largest_singular_value=1.0,
+            rtol=float(rtol),
+        )
+
+    monkeypatch.setattr(solver_module, '_dense_column_scaled_numerical_rank', fail_dense)
+    monkeypatch.setattr(solver_module, '_sparse_column_scaled_numerical_rank', fake_sparse)
+
+    diagnostic = _column_scaled_numerical_rank(
+        matrix,
+        expected_rank=512,
+        expected_nullity=1488,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.method == 'sparse_svds'
+    assert seen_shape == [(512, 2000)]
 
 
 def test_refraction_solver_system_gauge_adds_row_per_bipartite_component() -> None:
