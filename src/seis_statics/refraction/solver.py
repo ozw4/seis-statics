@@ -1344,10 +1344,7 @@ def _sparse_column_scaled_numerical_rank(
                         'is too close to the rank threshold to certify'
                     )
                 if critical > threshold:
-                    certification_residual = _sparse_triplet_residual_at(
-                        boundary_triplets,
-                        allowed_small_count,
-                    )
+                    certification_residual = boundary_triplets.max_residual
                     if allowed_small_count > 0:
                         certification_residual = max(
                             certification_residual,
@@ -2131,9 +2128,10 @@ def _run_lsq_linear(system: RefractionStaticSolveSystem) -> optimize.OptimizeRes
             polished_quality = polished.refraction_solver_quality_diagnostic
             if (
                 polished_quality.verified
-                and polished_quality.unscaled_objective
-                <= first_quality.unscaled_objective
-                + max(1.0e-24, 1.0e-12 * max(1.0, first_quality.unscaled_objective))
+                and _lsq_objective_is_nonincreasing(
+                    polished_quality.unscaled_objective,
+                    reference_objective=first_quality.unscaled_objective,
+                )
             ):
                 return polished
         return first
@@ -2416,6 +2414,21 @@ def _lsq_residual_gradient_objective(
     return residual, gradient, objective
 
 
+def _lsq_objective_is_nonincreasing(
+    objective: float,
+    *,
+    reference_objective: float,
+) -> bool:
+    objective = float(objective)
+    reference = float(reference_objective)
+    tolerance = float(
+        16.0
+        * np.finfo(np.float64).eps
+        * max(abs(objective), abs(reference), np.finfo(np.float64).tiny)
+    )
+    return objective <= reference + tolerance
+
+
 def _lsq_bound_tolerance(
     system: RefractionStaticSolveSystem,
     parameter_vector: np.ndarray,
@@ -2512,7 +2525,10 @@ def _active_set_polish_lsq_solution(
             system.upper_bounds[finite_upper],
         )
         _, _, objective = _lsq_residual_gradient_objective(system, candidate)
-        if objective > best_objective + max(1.0e-24, 1.0e-12 * max(1.0, best_objective)):
+        if not _lsq_objective_is_nonincreasing(
+            objective,
+            reference_objective=best_objective,
+        ):
             break
         x = candidate
         best_objective = objective

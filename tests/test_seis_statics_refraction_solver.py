@@ -291,6 +291,77 @@ def test_refraction_lsq_solution_is_invariant_to_common_system_scale() -> None:
         assert result.refraction_solver_quality['verified'] is True
 
 
+def test_refraction_solver_public_result_is_invariant_to_common_system_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_velocity = 2500.0
+    distance_m = np.asarray([500.0, 500.0], dtype=np.float64)
+    pick_time = distance_m / fixed_velocity + np.asarray(
+        [1.0e-6, 0.0],
+        dtype=np.float64,
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(2, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 20], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([30, 30], dtype=np.int64),
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=1,
+        n_traces=2,
+    )
+    model = _model(mode='fixed_global', fixed_velocity=fixed_velocity)
+    options = _solver_options(min_picks_per_node=1)
+    base = solve_refraction_static_design_least_squares(
+        design,
+        model=model,
+        solver_options=options,
+    )
+    original_builder = solver_module.build_refraction_static_solver_system
+
+    def scaled_builder(*args: object, **kwargs: object):
+        system = original_builder(*args, **kwargs)
+        common_scale = 1.0e-9
+        return replace(
+            system,
+            augmented_matrix=system.augmented_matrix * common_scale,
+            augmented_rhs_s=system.augmented_rhs_s * common_scale,
+            observation_matrix=system.observation_matrix * common_scale,
+        )
+
+    monkeypatch.setattr(
+        solver_module,
+        'build_refraction_static_solver_system',
+        scaled_builder,
+    )
+
+    scaled = solve_refraction_static_design_least_squares(
+        design,
+        model=model,
+        solver_options=options,
+    )
+
+    assert scaled.solver_success
+    assert scaled.qc['solver_quality']['verified'] is True
+    np.testing.assert_allclose(
+        scaled.node_half_intercept_time_s,
+        base.node_half_intercept_time_s,
+        atol=1.0e-10,
+    )
+    np.testing.assert_allclose(
+        scaled.row_modeled_pick_time_s,
+        base.row_modeled_pick_time_s,
+        atol=1.0e-10,
+    )
+    np.testing.assert_allclose(
+        scaled.row_residual_s,
+        base.row_residual_s,
+        atol=1.0e-10,
+    )
+
+
 def test_refraction_lsq_kkt_verifier_rejects_suboptimal_feasible_candidate() -> None:
     system = _simple_lsq_system(
         np.eye(2, dtype=np.float64),
@@ -419,6 +490,65 @@ def test_refraction_lsq_active_set_polish_improves_failed_attempt() -> None:
     assert polished.refraction_solver_quality['verified'] is True
     assert polished.refraction_solver_quality['unscaled_objective'] <= before_objective
     np.testing.assert_allclose(polished.x, [0.25, 0.75], atol=1.0e-12)
+
+
+def test_refraction_lsq_rejects_polished_result_with_worse_objective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system = _simple_lsq_system(
+        np.eye(1, dtype=np.float64),
+        np.zeros(1, dtype=np.float64),
+        lower=np.zeros(1, dtype=np.float64),
+        upper=np.ones(1, dtype=np.float64),
+    )
+
+    def worse_polish(
+        system_arg: solver_module.RefractionStaticSolveSystem,
+        parameter_vector: np.ndarray,
+        *,
+        solve_scale: float,
+        scipy_result: optimize.OptimizeResult,
+    ) -> optimize.OptimizeResult:
+        del system_arg, parameter_vector, scipy_result
+        quality = solver_module._LsqLinearQualityDiagnostic(
+            verified=True,
+            stage='active_set_polish',
+            failure_reason='',
+            solve_scale=float(solve_scale),
+            scipy_success=True,
+            scipy_status=1,
+            scipy_optimality=0.0,
+            scipy_iterations=1,
+            unscaled_augmented_residual_norm=1.0e-7,
+            unscaled_objective=1.0e-14,
+            projected_gradient_inf_norm=0.0,
+            kkt_tolerance=1.0,
+            max_bound_violation=0.0,
+            bound_tolerance=0.0,
+        )
+        result = optimize.OptimizeResult(
+            x=np.zeros(1, dtype=np.float64),
+            success=True,
+            status=1,
+            message='worse polished result',
+            cost=quality.unscaled_objective,
+            optimality=quality.projected_gradient_inf_norm,
+            nit=1,
+        )
+        result.refraction_solver_quality_diagnostic = quality
+        result.refraction_solver_quality = solver_module._lsq_quality_json(quality)
+        return result
+
+    monkeypatch.setattr(
+        solver_module,
+        '_active_set_polish_lsq_solution',
+        worse_polish,
+    )
+
+    result = solver_module._run_lsq_linear(system)
+
+    assert result.refraction_solver_quality['stage'] == 'first_attempt'
+    assert result.refraction_solver_quality['unscaled_objective'] == pytest.approx(0.0)
 
 
 def test_refraction_lsq_failure_remains_explicit(
@@ -796,6 +926,58 @@ def test_refraction_solver_sparse_bad_triplet_residual_does_not_certify(
             sparse.eye(1100, format='csr', dtype=np.float64),
             expected_rank=1100,
             expected_nullity=0,
+            rtol=1.0e-10,
+        )
+
+
+def test_refraction_solver_sparse_bad_allowed_null_triplet_residual_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boundary_triplets(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        del scaled_matrix, name
+        residuals = np.zeros(int(k), dtype=np.float64)
+        residuals[0] = 1.0
+        return solver_module._SparseSingularTripletDiagnostic(
+            singular_values=np.ones(int(k), dtype=np.float64),
+            max_residual=float(np.max(residuals)),
+            residuals=residuals,
+        )
+
+    def normal_triplets(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        which: object,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        del scaled_matrix, which, name
+        return solver_module._SparseSingularTripletDiagnostic(
+            singular_values=np.ones(int(k), dtype=np.float64),
+            max_residual=0.0,
+            residuals=np.zeros(int(k), dtype=np.float64),
+        )
+
+    monkeypatch.setattr(
+        solver_module,
+        '_sparse_svds_singular_triplets',
+        boundary_triplets,
+    )
+    monkeypatch.setattr(
+        solver_module,
+        '_sparse_normal_singular_triplets',
+        normal_triplets,
+    )
+
+    with pytest.raises(RefractionStaticSolverError, match='residual is too large'):
+        solver_module._sparse_column_scaled_numerical_rank(
+            sparse.eye(4, format='csr', dtype=np.float64),
+            expected_rank=3,
+            expected_nullity=1,
             rtol=1.0e-10,
         )
 
