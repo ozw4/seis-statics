@@ -323,6 +323,38 @@ def test_refraction_solver_large_sparse_skinny_rank_uses_sparse_path(
     assert seen_shape == [(512, 2000)]
 
 
+def test_refraction_solver_sparse_rank_one_uses_largest_singular_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def fake_svds(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        which: str,
+        return_singular_vectors: bool,
+    ) -> np.ndarray:
+        assert return_singular_vectors is False
+        calls.append((which, int(k)))
+        if which == 'LM':
+            return np.asarray([1.0], dtype=np.float64)
+        raise AssertionError(f'unexpected svds request for shape {scaled_matrix.shape}')
+
+    monkeypatch.setattr(solver_module.sparse_linalg, 'svds', fake_svds)
+
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        sparse.csr_matrix(([1.0], ([0], [0])), shape=(3, 3), dtype=np.float64),
+        expected_rank=1,
+        expected_nullity=2,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.estimated_rank == 1
+    assert diagnostic.critical_singular_value == 1.0
+    assert calls == [('LM', 1)]
+
+
 def test_refraction_solver_sparse_rank_failure_reports_diagnostic_rank(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

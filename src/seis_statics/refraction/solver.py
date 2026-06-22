@@ -1204,7 +1204,7 @@ def _sparse_column_scaled_numerical_rank(
             if critical_index < 0:
                 critical = 0.0
                 estimated_rank = min_dim
-            elif min_dim == 1:
+            elif expected_rank == 1:
                 critical = largest
                 estimated_rank = int(largest > threshold)
             else:
