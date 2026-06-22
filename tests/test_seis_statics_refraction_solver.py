@@ -389,6 +389,33 @@ def test_refraction_lsq_kkt_verifier_rejects_suboptimal_feasible_candidate() -> 
     assert quality.projected_gradient_inf_norm > quality.kkt_tolerance
 
 
+def test_refraction_lsq_kkt_verifier_rejects_large_cancellation_bound_case() -> None:
+    system = _simple_lsq_system(
+        np.ones((1, 1), dtype=np.float64),
+        np.asarray([1.0e12 + 1.0], dtype=np.float64),
+        lower=np.asarray([1.0e12], dtype=np.float64),
+        upper=np.full(1, np.inf, dtype=np.float64),
+    )
+    fake = optimize.OptimizeResult(
+        success=True,
+        status=1,
+        optimality=0.0,
+        nit=1,
+    )
+
+    _, quality = solver_module._verify_lsq_linear_solution(
+        system,
+        np.asarray([1.0e12], dtype=np.float64),
+        solve_scale=1.0,
+        stage='test',
+        scipy_result=fake,
+    )
+
+    assert not quality.verified
+    assert quality.projected_gradient_inf_norm == pytest.approx(1.0)
+    assert quality.kkt_tolerance < quality.projected_gradient_inf_norm
+
+
 def test_refraction_lsq_kkt_verifier_handles_bound_gradient_signs() -> None:
     lower_system = _simple_lsq_system(
         np.ones((1, 1), dtype=np.float64),
@@ -801,6 +828,22 @@ def test_refraction_solver_sparse_rank_one_uses_largest_singular_value(
     assert diagnostic.estimated_rank == 1
     assert diagnostic.critical_singular_value == pytest.approx(1.0)
     assert diagnostic.certification_status == 'certified'
+    assert diagnostic.requested_smallest_count == 0
+    assert diagnostic.method == 'sparse_normal_eigsh'
+    assert diagnostic.sparse_solver_name == 'eigsh_normal'
+
+
+def test_refraction_solver_sparse_rank_zero_reports_largest_solver_only() -> None:
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        sparse.eye(3, format='csr', dtype=np.float64),
+        expected_rank=0,
+        expected_nullity=3,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'rank_deficient'
+    assert diagnostic.method == 'sparse_normal_eigsh'
+    assert diagnostic.sparse_solver_name == 'eigsh_normal'
     assert diagnostic.requested_smallest_count == 0
 
 

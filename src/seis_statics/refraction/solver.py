@@ -1231,6 +1231,8 @@ def _sparse_column_scaled_numerical_rank(
     returned_smallest_count = 0
     max_residual = 0.0
     failure_reason = ''
+    method = 'sparse_empty'
+    sparse_solver_name = ''
     if min_dim == 0:
         largest = 0.0
         threshold = 0.0
@@ -1238,6 +1240,7 @@ def _sparse_column_scaled_numerical_rank(
         critical = 0.0
         certification_status = 'certified'
     elif min_dim == 1:
+        method = 'sparse_direct_norm'
         largest = float(np.sqrt(float(scaled_matrix.power(2).sum())))
         _validate_finite(
             np.asarray([largest], dtype=np.float64),
@@ -1254,6 +1257,8 @@ def _sparse_column_scaled_numerical_rank(
         if certification_status != 'certified':
             failure_reason = 'critical singular value is not above threshold'
     else:
+        method = 'sparse_normal_eigsh'
+        sparse_solver_name = 'eigsh_normal'
         largest_triplets = _sparse_normal_singular_triplets(
             scaled_matrix,
             k=1,
@@ -1308,6 +1313,7 @@ def _sparse_column_scaled_numerical_rank(
                 failure_reason = 'expected rank exceeds matrix smaller dimension'
             else:
                 requested_smallest_count = allowed_small_count + 1
+                sparse_solver_name = 'propack_svds+eigsh_normal'
                 boundary_triplets = _sparse_svds_singular_triplets(
                     scaled_matrix,
                     k=requested_smallest_count,
@@ -1377,7 +1383,7 @@ def _sparse_column_scaled_numerical_rank(
                         'critical singular value is not above threshold'
                     )
     return _NumericalRankDiagnostic(
-        method='sparse_normal_eigsh',
+        method=method,
         n_rows=n_rows,
         n_columns=n_columns,
         expected_rank=int(expected_rank),
@@ -1388,7 +1394,7 @@ def _sparse_column_scaled_numerical_rank(
         critical_singular_value=float(critical),
         largest_singular_value=float(largest),
         rtol=float(rtol),
-        sparse_solver_name='propack_svds+eigsh_normal',
+        sparse_solver_name=sparse_solver_name,
         certification_status=certification_status,
         requested_smallest_count=int(requested_smallest_count),
         returned_smallest_count=int(returned_smallest_count),
@@ -2504,16 +2510,23 @@ def _projected_gradient_quality(
         x_norm,
     )
     rhs_reference = _safe_nonnegative_product(max_col_norm, rhs_norm)
-    gradient_reference = max(
-        residual_reference,
+    gradient_reference = max(residual_reference, np.finfo(np.float64).tiny)
+    roundoff_reference = max(
+        gradient_reference,
         normal_solution_reference + rhs_reference,
-        np.finfo(np.float64).tiny,
     )
-    if not np.isfinite(gradient_reference):
+    if not np.isfinite(gradient_reference) or not np.isfinite(roundoff_reference):
         return pg_norm, 0.0
+    absolute_reference = max(max_col_norm, matrix_fro_norm, 1.0)
+    # KKT stationarity is based on g = A.T r. Large A*x and b terms may
+    # nearly cancel, so they only add a machine-precision roundoff allowance.
     tolerance = max(
         1.0e-10 * gradient_reference,
-        1.0e4 * np.finfo(np.float64).eps * gradient_reference,
+        1.0e4 * np.finfo(np.float64).eps * max(
+            gradient_reference,
+            absolute_reference,
+        ),
+        64.0 * np.finfo(np.float64).eps * roundoff_reference,
         np.finfo(np.float64).tiny,
     )
     return pg_norm, float(tolerance)
