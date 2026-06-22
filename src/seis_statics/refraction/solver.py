@@ -1326,10 +1326,13 @@ def _sparse_column_scaled_numerical_rank(
                         'sparse physical identifiability returned too few '
                         'smallest singular triplets'
                     )
-                critical = min(
-                    float(boundary_triplets.singular_values[allowed_small_count]),
-                    float(corroborating_values[allowed_small_count]),
+                boundary_critical = float(
+                    boundary_triplets.singular_values[allowed_small_count]
                 )
+                corroborating_critical = float(
+                    corroborating_values[allowed_small_count]
+                )
+                critical = min(boundary_critical, corroborating_critical)
                 if _critical_singular_value_is_ambiguous(
                     critical,
                     threshold=threshold,
@@ -1354,6 +1357,23 @@ def _sparse_column_scaled_numerical_rank(
                                         corroborating_triplets,
                                     )[:allowed_small_count]
                                 )
+                            ),
+                        )
+                    boundary_comparison_tolerance = float(
+                        1.0e2
+                        * np.finfo(np.float64).eps
+                        * max(1.0, largest)
+                        * max(1, max(map(int, scaled_matrix.shape)))
+                    )
+                    if (
+                        corroborating_critical
+                        < boundary_critical - boundary_comparison_tolerance
+                    ):
+                        certification_residual = max(
+                            certification_residual,
+                            _sparse_triplet_residual_at(
+                                corroborating_triplets,
+                                allowed_small_count,
                             ),
                         )
                     max_residual = max(max_residual, certification_residual)

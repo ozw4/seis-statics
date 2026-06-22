@@ -800,6 +800,56 @@ def test_refraction_solver_sparse_bad_triplet_residual_does_not_certify(
         )
 
 
+def test_refraction_solver_sparse_bad_corroborating_boundary_residual_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def good_boundary_triplets(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        return solver_module._SparseSingularTripletDiagnostic(
+            singular_values=np.ones(int(k), dtype=np.float64),
+            max_residual=0.0,
+            residuals=np.zeros(int(k), dtype=np.float64),
+        )
+
+    def normal_triplets(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        which: object,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        bad_residual = 1.0 if which == 'SA' else 0.0
+        singular_value = 0.5 if which == 'SA' else 1.0
+        return solver_module._SparseSingularTripletDiagnostic(
+            singular_values=np.full(int(k), singular_value, dtype=np.float64),
+            max_residual=bad_residual,
+            residuals=np.full(int(k), bad_residual, dtype=np.float64),
+        )
+
+    monkeypatch.setattr(
+        solver_module,
+        '_sparse_svds_singular_triplets',
+        good_boundary_triplets,
+    )
+    monkeypatch.setattr(
+        solver_module,
+        '_sparse_normal_singular_triplets',
+        normal_triplets,
+    )
+
+    with pytest.raises(RefractionStaticSolverError, match='residual is too large'):
+        solver_module._sparse_column_scaled_numerical_rank(
+            sparse.eye(4, format='csr', dtype=np.float64),
+            expected_rank=4,
+            expected_nullity=0,
+            rtol=1.0e-10,
+        )
+
+
 def test_refraction_solver_large_sparse_global_slowness_duplicate_path_regression() -> None:
     n_nodes = 1100
     source_node_id = np.r_[np.arange(n_nodes - 1), 0].astype(np.int64)
