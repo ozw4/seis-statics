@@ -176,6 +176,46 @@ _SOLVER_EXPORTS = frozenset(
         'validate_refraction_static_solver_options',
     }
 )
+_BEDROCK_EXPORTS = frozenset(
+    {
+        'GlobalBedrockSlownessEstimateResult',
+        'RefractionBedrockEstimationError',
+        'estimate_global_bedrock_slowness_from_input_model',
+    }
+)
+_HALF_INTERCEPT_EXPORTS = frozenset(
+    {
+        'RefractionHalfInterceptEndpointResult',
+        'RefractionHalfInterceptError',
+        'RefractionHalfInterceptResult',
+        'build_refraction_half_intercept_design',
+        'build_refraction_half_intercept_result',
+        'build_refraction_half_intercept_result_from_bedrock_result',
+        'estimate_refraction_half_intercept_from_design',
+        'estimate_refraction_half_intercept_from_input_model',
+    }
+)
+_WEATHERING_EXPORTS = frozenset(
+    {
+        'RefractionWeatheringEndpointComponents',
+        'RefractionWeatheringError',
+        'RefractionWeatheringModel',
+        'RefractionWeatheringThicknessComputation',
+        'build_refraction_weathering_model_from_half_intercept_result',
+        'compute_weathering_thickness_from_half_intercept_time',
+        'compute_weathering_thickness_from_half_intercept_time_with_status',
+        'compute_weathering_thickness_scalar_from_half_intercept_time',
+    }
+)
+_WEATHERING_REPLACEMENT_EXPORTS = frozenset(
+    {
+        'RefractionWeatheringReplacementError',
+        'RefractionWeatheringReplacementResult',
+        'build_refraction_weathering_replacement_statics',
+        'compute_weathering_replacement_shift_s',
+        'compute_weathering_replacement_shift_scalar_s',
+    }
+)
 
 
 def __getattr__(name: str) -> object:
@@ -191,12 +231,37 @@ def __getattr__(name: str) -> object:
         value = getattr(solver, name)
         globals()[name] = value
         return value
+    if name in _BEDROCK_EXPORTS:
+        from seis_statics.refraction import bedrock
+
+        value = getattr(bedrock, name)
+        globals()[name] = value
+        return value
+    if name in _HALF_INTERCEPT_EXPORTS:
+        from seis_statics.refraction import half_intercept
+
+        value = getattr(half_intercept, name)
+        globals()[name] = value
+        return value
+    if name in _WEATHERING_EXPORTS:
+        from seis_statics.refraction import weathering
+
+        value = getattr(weathering, name)
+        globals()[name] = value
+        return value
+    if name in _WEATHERING_REPLACEMENT_EXPORTS:
+        from seis_statics.refraction import weathering_replacement
+
+        value = getattr(weathering_replacement, name)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
 
 
 __all__ = [
     'BedrockVelocityMode',
     'ALREADY_ASSIGNED_REJECTION_REASON',
+    'GlobalBedrockSlownessEstimateResult',
     'INVALID_OBSERVATION_REJECTION_REASON',
     'INVALID_OFFSET_REJECTION_REASON',
     'LOCAL_V2_STATUS_VALUES',
@@ -215,6 +280,7 @@ __all__ = [
     'RefractionCellGrid',
     'RefractionCellProjectedPoints',
     'RefractionCellProjectedSourceReceiver',
+    'RefractionBedrockEstimationError',
     'RefractionDesignMatrixNodeDiagnostics',
     'RefractionEndpointTable',
     'RefractionEndpointFieldCorrectionResult',
@@ -223,6 +289,9 @@ __all__ = [
     'RefractionFieldCompositionError',
     'RefractionFieldInvalidComponentPolicy',
     'RefractionFirstLayerMode',
+    'RefractionHalfInterceptEndpointResult',
+    'RefractionHalfInterceptError',
+    'RefractionHalfInterceptResult',
     'RefractionLayerAssignmentPolicy',
     'RefractionLayerConfig',
     'RefractionLayerConfigLayer',
@@ -248,6 +317,12 @@ __all__ = [
     'RefractionTraceFieldCorrectionResult',
     'RefractionV1EstimateResult',
     'RefractionV1EstimationError',
+    'RefractionWeatheringEndpointComponents',
+    'RefractionWeatheringError',
+    'RefractionWeatheringModel',
+    'RefractionWeatheringReplacementError',
+    'RefractionWeatheringReplacementResult',
+    'RefractionWeatheringThicknessComputation',
     'RefractionStaticLayerKind',
     'RefractionStaticLayerAssignmentPolicy',
     'RefractionStaticLayerOptions',
@@ -283,10 +358,15 @@ __all__ = [
     'build_refraction_layer_observation_masks',
     'build_refraction_cell_grid',
     'build_refraction_design_matrix_node_diagnostics',
+    'build_refraction_half_intercept_design',
+    'build_refraction_half_intercept_result',
+    'build_refraction_half_intercept_result_from_bedrock_result',
     'build_refraction_static_cell_design_matrix',
     'build_refraction_static_design_matrix',
     'build_refraction_static_design_matrix_from_arrays',
     'build_refraction_static_solver_system',
+    'build_refraction_weathering_model_from_half_intercept_result',
+    'build_refraction_weathering_replacement_statics',
     'classify_refraction_endpoint_static_status',
     'compose_t1lsst_1layer_endpoint_component_rows',
     'compose_refraction_endpoint_field_corrections',
@@ -300,12 +380,20 @@ __all__ = [
     'compute_t1lsst_3layer_thicknesses',
     'compute_t1lsst_3layer_thicknesses_with_status',
     'compute_t1lsst_3layer_weathering_correction',
+    'compute_weathering_thickness_from_half_intercept_time',
+    'compute_weathering_thickness_from_half_intercept_time_with_status',
+    'compute_weathering_thickness_scalar_from_half_intercept_time',
+    'compute_weathering_replacement_shift_s',
+    'compute_weathering_replacement_shift_scalar_s',
     'compute_source_depth_weathering_time_correction',
     'compute_source_depth_weathering_time_correction_from_result',
     'compute_source_receiver_midpoints',
     'compute_uphole_time_correction',
     'compute_uphole_time_correction_from_result',
     'estimate_global_v1_from_direct_arrivals',
+    'estimate_global_bedrock_slowness_from_input_model',
+    'estimate_refraction_half_intercept_from_design',
+    'estimate_refraction_half_intercept_from_input_model',
     'effective_refraction_cell_grid_config',
     'layer_offset_gate_contains',
     'manual_static_inline_rows',
