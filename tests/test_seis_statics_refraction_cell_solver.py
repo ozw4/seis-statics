@@ -258,6 +258,44 @@ def test_refraction_cell_solver_recovers_cell_v2_and_row_midpoint_v2() -> None:
     json.dumps(result.qc, allow_nan=False)
 
 
+def test_refraction_cell_solver_identifiability_and_polished_cost_are_unscaled() -> None:
+    node_id = np.asarray([10], dtype=np.int64)
+    distance_m = np.asarray([500.0, 700.0, 700.0], dtype=np.float64)
+    pick_time = 2.0 * 0.015 + distance_m / 2500.0
+    pick_time[2] += 0.02
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(3, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 10, 10], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([10, 10, 10], dtype=np.int64),
+        distance_m_sorted=distance_m,
+        node_id=node_id,
+        bedrock_velocity_mode='solve_cell',
+        midpoint_cell_id_sorted=np.zeros(3, dtype=np.int64),
+        n_total_cells=1,
+        number_of_cell_x=1,
+        number_of_cell_y=1,
+        cell_assignment_mode='midpoint',
+        min_observations_per_cell=1,
+        n_traces=3,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_cell_model(n_cells=1),
+        solver_options=_solver_options(),
+    )
+
+    quality = result.qc['solver_quality']
+    assert result.system.identifiability.expected_rank == 2
+    assert result.system.identifiability.estimated_rank == 2
+    assert quality['stage'] == 'active_set_polish'
+    assert quality['solve_scale'] != pytest.approx(1.0)
+    assert result.solver_cost == pytest.approx(quality['unscaled_objective'])
+    assert result.qc['solver_cost'] == pytest.approx(quality['unscaled_objective'])
+    np.testing.assert_allclose(result.row_residual_s, [0.0, -0.01, 0.01], atol=1.0e-12)
+
+
 def test_refraction_cell_solver_high_level_forwards_min_picks_per_node() -> None:
     model = _cell_model(n_cells=2, min_observations_per_cell=2)
 

@@ -236,6 +236,36 @@ def test_refraction_solver_fixed_global_exact_fit_is_scale_stable(
     assert result.qc['solver_quality']['solve_scale'] > 0.0
 
 
+def test_refraction_solver_polished_solver_cost_is_unscaled_in_qc() -> None:
+    fixed_velocity = 2500.0
+    distance_m = np.asarray([500.0, 500.0], dtype=np.float64)
+    pick_time = distance_m / fixed_velocity + np.asarray([0.02, 0.04])
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(2, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 10], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([10, 10], dtype=np.int64),
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        n_traces=2,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(),
+    )
+
+    quality = result.qc['solver_quality']
+    assert quality['stage'] == 'active_set_polish'
+    assert quality['solve_scale'] != pytest.approx(1.0)
+    assert result.solver_cost == pytest.approx(quality['unscaled_objective'])
+    assert result.qc['solver_cost'] == pytest.approx(quality['unscaled_objective'])
+    np.testing.assert_allclose(result.row_residual_s, [-0.01, 0.01], atol=1.0e-12)
+
+
 def test_refraction_lsq_solution_is_invariant_to_common_system_scale() -> None:
     base = _simple_lsq_system(
         np.asarray([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=np.float64),
@@ -1547,13 +1577,14 @@ def test_refraction_solver_robust_rejection_allows_identifiable_graph_split() ->
     )
 
     assert result.robust_stop_reason == 'zero_scale'
-    assert result.n_rejected_observations == 1
+    assert result.n_rejected_observations == 2
     np.testing.assert_array_equal(
         result.used_observation_mask_sorted,
-        [True, True, True, True, False],
+        [True, True, False, True, False],
     )
     assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 1
-    assert result.system.n_observation_rows == 4
+    assert result.robust_iteration_summaries[1].n_rejected_this_iteration == 1
+    assert result.system.n_observation_rows == 3
     assert result.system.n_node_components == 2
     assert result.system.n_gauge_rows == 0
     assert np.count_nonzero(result.system.gauge_required_by_component) == 2

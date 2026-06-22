@@ -1313,14 +1313,14 @@ def _sparse_column_scaled_numerical_rank(
                     k=requested_smallest_count,
                     name='physical_matrix smallest sparse singular triplets',
                 )
-                corroborating_values = _sparse_normal_singular_triplets(
+                corroborating_triplets = _sparse_normal_singular_triplets(
                     scaled_matrix,
                     k=requested_smallest_count,
                     which='SA',
                     name='physical_matrix corroborating sparse singular values',
-                ).singular_values
+                )
+                corroborating_values = corroborating_triplets.singular_values
                 returned_smallest_count = int(boundary_triplets.singular_values.size)
-                max_residual = max(max_residual, boundary_triplets.max_residual)
                 if returned_smallest_count < requested_smallest_count:
                     raise RefractionStaticSolverError(
                         'sparse physical identifiability returned too few '
@@ -1341,7 +1341,23 @@ def _sparse_column_scaled_numerical_rank(
                         'is too close to the rank threshold to certify'
                     )
                 if critical > threshold:
-                    if boundary_triplets.max_residual > residual_tolerance:
+                    certification_residual = _sparse_triplet_residual_at(
+                        boundary_triplets,
+                        allowed_small_count,
+                    )
+                    if allowed_small_count > 0:
+                        certification_residual = max(
+                            certification_residual,
+                            float(
+                                np.max(
+                                    _sparse_triplet_residuals(
+                                        corroborating_triplets,
+                                    )[:allowed_small_count]
+                                )
+                            ),
+                        )
+                    max_residual = max(max_residual, certification_residual)
+                    if certification_residual > residual_tolerance:
                         raise RefractionStaticSolverError(
                             'sparse physical identifiability smallest singular '
                             'triplet residual is too large'
@@ -1360,6 +1376,11 @@ def _sparse_column_scaled_numerical_rank(
                     )
                     estimated_rank = max(0, min_dim - n_small)
                     certification_status = 'rank_deficient'
+                    max_residual = max(
+                        max_residual,
+                        boundary_triplets.max_residual,
+                        corroborating_triplets.max_residual,
+                    )
                     failure_reason = (
                         'critical singular value is not above threshold'
                     )
@@ -1388,6 +1409,27 @@ def _sparse_column_scaled_numerical_rank(
 class _SparseSingularTripletDiagnostic:
     singular_values: np.ndarray
     max_residual: float
+    residuals: np.ndarray | None = None
+
+
+def _sparse_triplet_residuals(
+    diagnostic: _SparseSingularTripletDiagnostic,
+) -> np.ndarray:
+    if diagnostic.residuals is None:
+        return np.full(
+            diagnostic.singular_values.shape,
+            float(diagnostic.max_residual),
+            dtype=np.float64,
+        )
+    return np.asarray(diagnostic.residuals, dtype=np.float64)
+
+
+def _sparse_triplet_residual_at(
+    diagnostic: _SparseSingularTripletDiagnostic,
+    index: int,
+) -> float:
+    residuals = _sparse_triplet_residuals(diagnostic)
+    return float(residuals[int(index)])
 
 
 def _sparse_normal_singular_triplets(
@@ -1471,14 +1513,16 @@ def _sparse_normal_singular_triplets(
         )
         for index in range(int(k))
     ]
-    out = np.asarray(singular_values, dtype=np.float64)
-    out.sort()
-    _validate_finite(out, name=name)
     residual_array = np.asarray(residuals, dtype=np.float64)
+    sort_order = np.argsort(singular_values)
+    out = np.asarray(singular_values[sort_order], dtype=np.float64)
+    residual_array = np.asarray(residual_array[sort_order], dtype=np.float64)
+    _validate_finite(out, name=name)
     _validate_finite(residual_array, name=f'{name} residuals')
     return _SparseSingularTripletDiagnostic(
         singular_values=out,
         max_residual=float(np.max(residual_array)) if residual_array.size else 0.0,
+        residuals=residual_array,
     )
 
 
@@ -1537,6 +1581,7 @@ def _sparse_svds_singular_triplets(
     return _SparseSingularTripletDiagnostic(
         singular_values=values,
         max_residual=float(np.max(residual_array)) if residual_array.size else 0.0,
+        residuals=residual_array,
     )
 
 
@@ -1708,14 +1753,9 @@ def _run_refraction_static_solver(
             current_residual,
             center_s=center_s,
         )
-        zero_scale_tolerance = _robust_zero_scale_tolerance(current_residual)
         n_used_before = int(np.count_nonzero(current_row_mask))
 
-        if scale_s <= 0.0 or (
-            scale_s <= zero_scale_tolerance
-            and max_abs_centered_residual_s <= zero_scale_tolerance
-            and float(robust.threshold) <= 1.0
-        ):
+        if scale_s <= 0.0:
             stop_reason = 'zero_scale'
             final_raw = raw
             final_system = current_system
@@ -2012,13 +2052,6 @@ def _max_abs_centered_residual(
     if residual_s.size == 0:
         return 0.0
     return float(np.max(np.abs(residual_s - center_s)))
-
-
-def _robust_zero_scale_tolerance(residual_s: np.ndarray) -> float:
-    if residual_s.size == 0:
-        return 0.0
-    residual_scale = max(1.0, float(np.max(np.abs(residual_s))))
-    return float(1.0e3 * np.finfo(np.float64).eps * residual_scale)
 
 
 def _validate_robust_method(value: object) -> str:
@@ -2477,7 +2510,7 @@ def _active_set_polish_lsq_solution(
             result.success = bool(quality.verified)
             result.status = int(getattr(scipy_result, 'status', 0))
             result.message = 'active-set polished after lsq_linear retry'
-            result.cost = quality.unscaled_objective * solve_scale * solve_scale
+            result.cost = quality.unscaled_objective
             result.optimality = quality.projected_gradient_inf_norm
             result.active_mask = _active_mask_for_parameter_vector(
                 x,
