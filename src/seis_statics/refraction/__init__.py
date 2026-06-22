@@ -176,6 +176,13 @@ _SOLVER_EXPORTS = frozenset(
         'validate_refraction_static_solver_options',
     }
 )
+_BEDROCK_EXPORTS = frozenset(
+    {
+        'GlobalBedrockSlownessEstimateResult',
+        'RefractionBedrockEstimationError',
+        'estimate_global_bedrock_slowness_from_input_model',
+    }
+)
 
 
 def __getattr__(name: str) -> object:
@@ -191,12 +198,19 @@ def __getattr__(name: str) -> object:
         value = getattr(solver, name)
         globals()[name] = value
         return value
+    if name in _BEDROCK_EXPORTS:
+        from seis_statics.refraction import bedrock
+
+        value = getattr(bedrock, name)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
 
 
 __all__ = [
     'BedrockVelocityMode',
     'ALREADY_ASSIGNED_REJECTION_REASON',
+    'GlobalBedrockSlownessEstimateResult',
     'INVALID_OBSERVATION_REJECTION_REASON',
     'INVALID_OFFSET_REJECTION_REASON',
     'LOCAL_V2_STATUS_VALUES',
@@ -215,6 +229,7 @@ __all__ = [
     'RefractionCellGrid',
     'RefractionCellProjectedPoints',
     'RefractionCellProjectedSourceReceiver',
+    'RefractionBedrockEstimationError',
     'RefractionDesignMatrixNodeDiagnostics',
     'RefractionEndpointTable',
     'RefractionEndpointFieldCorrectionResult',
@@ -306,6 +321,7 @@ __all__ = [
     'compute_uphole_time_correction',
     'compute_uphole_time_correction_from_result',
     'estimate_global_v1_from_direct_arrivals',
+    'estimate_global_bedrock_slowness_from_input_model',
     'effective_refraction_cell_grid_config',
     'layer_offset_gate_contains',
     'manual_static_inline_rows',
