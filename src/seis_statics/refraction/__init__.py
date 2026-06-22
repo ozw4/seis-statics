@@ -216,6 +216,19 @@ _WEATHERING_REPLACEMENT_EXPORTS = frozenset(
         'compute_weathering_replacement_shift_scalar_s',
     }
 )
+_DATUM_EXPORTS = frozenset(
+    {
+        'RefractionDatumEndpointResult',
+        'RefractionDatumError',
+        'RefractionDatumStaticsResult',
+        'ResolvedFloatingDatum',
+        'build_refraction_datum_statics',
+        'build_refraction_endpoint_datum_statics',
+        'compute_refraction_datum_elevation_shift_s',
+        'compute_refraction_datum_elevation_shift_scalar_s',
+        'smooth_refraction_floating_datum_elevation',
+    }
+)
 
 
 def __getattr__(name: str) -> object:
@@ -255,6 +268,12 @@ def __getattr__(name: str) -> object:
         value = getattr(weathering_replacement, name)
         globals()[name] = value
         return value
+    if name in _DATUM_EXPORTS:
+        from seis_statics.refraction import datum
+
+        value = getattr(datum, name)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
 
 
@@ -282,6 +301,9 @@ __all__ = [
     'RefractionCellProjectedSourceReceiver',
     'RefractionBedrockEstimationError',
     'RefractionDesignMatrixNodeDiagnostics',
+    'RefractionDatumEndpointResult',
+    'RefractionDatumError',
+    'RefractionDatumStaticsResult',
     'RefractionEndpointTable',
     'RefractionEndpointFieldCorrectionResult',
     'RefractionFieldCorrectionComponentName',
@@ -352,12 +374,15 @@ __all__ = [
     'RefractionUpholeResult',
     'RefractionUpholeStatus',
     'ResolvedRefractionFirstLayer',
+    'ResolvedFloatingDatum',
     'T1LSST_SIGN_CONVENTION',
     'assign_observation_midpoint_cells',
     'assign_points_to_refraction_cells',
     'build_refraction_layer_observation_masks',
     'build_refraction_cell_grid',
+    'build_refraction_datum_statics',
     'build_refraction_design_matrix_node_diagnostics',
+    'build_refraction_endpoint_datum_statics',
     'build_refraction_half_intercept_design',
     'build_refraction_half_intercept_result',
     'build_refraction_half_intercept_result_from_bedrock_result',
@@ -380,6 +405,8 @@ __all__ = [
     'compute_t1lsst_3layer_thicknesses',
     'compute_t1lsst_3layer_thicknesses_with_status',
     'compute_t1lsst_3layer_weathering_correction',
+    'compute_refraction_datum_elevation_shift_s',
+    'compute_refraction_datum_elevation_shift_scalar_s',
     'compute_weathering_thickness_from_half_intercept_time',
     'compute_weathering_thickness_from_half_intercept_time_with_status',
     'compute_weathering_thickness_scalar_from_half_intercept_time',
@@ -414,6 +441,7 @@ __all__ = [
     'resolved_first_layer_weathering_velocity_m_s',
     'solve_refraction_static_design_least_squares',
     'solve_refraction_static_least_squares',
+    'smooth_refraction_floating_datum_elevation',
     'summarize_refraction_static_design_matrix',
     'summarize_refraction_static_solve_result',
     'validate_refraction_static_solver_options',
