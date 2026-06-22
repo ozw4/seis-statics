@@ -15,6 +15,10 @@ from seis_statics.time_term import (
     solve_time_term_sparse_least_squares,
     summarize_time_term_sparse_solver_result,
 )
+from seis_statics.time_term.sparse_solver import (
+    _ValidatedTimeTermDesign,
+    _build_trace_prediction_valid_mask,
+)
 
 TRUE_NODE_TIME_TERM_S = np.asarray([0.010, -0.002, 0.006], dtype=np.float64)
 SOURCE_NODE_ID_SORTED = np.asarray([0, 0, 1, 2, 1], dtype=np.int64)
@@ -350,6 +354,41 @@ def test_time_term_sparse_solver_fit_used_only_prediction_policy_limits_delay() 
     assert summary['n_prediction_valid_traces'] == 4
     assert summary['n_fit_unused_prediction_valid_traces'] == 0
     assert summary['n_unsupported_endpoint_traces'] == 0
+
+
+def test_fit_used_only_prediction_policy_uses_final_fit_mask_exactly() -> None:
+    design = _ValidatedTimeTermDesign(
+        matrix=sparse.csr_matrix((2, 3), dtype=np.float64),
+        data_s=np.zeros(2, dtype=np.float64),
+        n_traces=3,
+        n_observations=2,
+        n_nodes=3,
+        used_trace_mask_sorted=np.asarray([True, True, False]),
+        row_trace_index_sorted=np.asarray([0, 1], dtype=np.int64),
+        row_source_node_id=np.asarray([0, 1], dtype=np.int64),
+        row_receiver_node_id=np.asarray([1, 2], dtype=np.int64),
+        source_node_id_sorted=np.asarray([0, 1, 2], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([1, 2, 0], dtype=np.int64),
+        total_observation_count_by_node=np.asarray([1, 1, 1], dtype=np.int64),
+    )
+
+    fit_used_mask = _build_trace_prediction_valid_mask(
+        design,
+        options=TimeTermSparseSolverOptions(
+            min_total_observations_per_node=2,
+            trace_prediction_policy='fit_used_only',
+        ),
+    )
+    all_supported_mask = _build_trace_prediction_valid_mask(
+        design,
+        options=TimeTermSparseSolverOptions(
+            min_total_observations_per_node=2,
+            trace_prediction_policy='all_supported',
+        ),
+    )
+
+    np.testing.assert_array_equal(fit_used_mask, [True, True, False])
+    np.testing.assert_array_equal(all_supported_mask, [False, False, False])
 
 
 def test_time_term_sparse_solver_unsupported_endpoint_prediction_stays_nan() -> None:

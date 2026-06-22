@@ -14,7 +14,7 @@ It does not provide:
 - viewer/UI functionality
 - FastAPI services
 - job/artifact management
-- provenance, artifact locator, or job identity ownership
+- provenance, artifact locator, or job identity, which are consumer-owned
 - seismic MAE or denoising models
 
 Those responsibilities should remain in higher-level applications such as `seisviewer2d` or `seisai`.

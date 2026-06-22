@@ -99,9 +99,10 @@ class TimeTermSparseSolverResult:
 
     ``used_trace_mask_sorted`` is fit eligibility for this solve. It does not
     define where the final node model may be applied.
-    ``prediction_valid_trace_mask_sorted`` marks traces whose endpoint nodes are
-    supported by the final used observations under the selected trace prediction
-    policy.
+    ``prediction_valid_trace_mask_sorted`` marks traces eligible for final
+    model application under the selected trace prediction policy. The
+    ``all_supported`` policy uses endpoint support from final used
+    observations; ``fit_used_only`` uses the final fit mask exactly.
     """
 
     node_time_term_s: np.ndarray
@@ -636,14 +637,13 @@ def _build_trace_prediction_valid_mask(
     *,
     options: TimeTermSparseSolverOptions,
 ) -> np.ndarray:
-    endpoint_supported = _build_endpoint_supported_trace_mask(design, options=options)
     if options.trace_prediction_policy == 'fit_used_only':
         return np.ascontiguousarray(
-            design.used_trace_mask_sorted & endpoint_supported,
+            design.used_trace_mask_sorted,
             dtype=bool,
         )
 
-    return endpoint_supported
+    return _build_endpoint_supported_trace_mask(design, options=options)
 
 
 def _build_endpoint_supported_trace_mask(
