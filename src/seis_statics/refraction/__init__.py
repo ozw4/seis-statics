@@ -207,6 +207,15 @@ _WEATHERING_EXPORTS = frozenset(
         'compute_weathering_thickness_scalar_from_half_intercept_time',
     }
 )
+_WEATHERING_REPLACEMENT_EXPORTS = frozenset(
+    {
+        'RefractionWeatheringReplacementError',
+        'RefractionWeatheringReplacementResult',
+        'build_refraction_weathering_replacement_statics',
+        'compute_weathering_replacement_shift_s',
+        'compute_weathering_replacement_shift_scalar_s',
+    }
+)
 
 
 def __getattr__(name: str) -> object:
@@ -238,6 +247,12 @@ def __getattr__(name: str) -> object:
         from seis_statics.refraction import weathering
 
         value = getattr(weathering, name)
+        globals()[name] = value
+        return value
+    if name in _WEATHERING_REPLACEMENT_EXPORTS:
+        from seis_statics.refraction import weathering_replacement
+
+        value = getattr(weathering_replacement, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
@@ -305,6 +320,8 @@ __all__ = [
     'RefractionWeatheringEndpointComponents',
     'RefractionWeatheringError',
     'RefractionWeatheringModel',
+    'RefractionWeatheringReplacementError',
+    'RefractionWeatheringReplacementResult',
     'RefractionWeatheringThicknessComputation',
     'RefractionStaticLayerKind',
     'RefractionStaticLayerAssignmentPolicy',
@@ -349,6 +366,7 @@ __all__ = [
     'build_refraction_static_design_matrix_from_arrays',
     'build_refraction_static_solver_system',
     'build_refraction_weathering_model_from_half_intercept_result',
+    'build_refraction_weathering_replacement_statics',
     'classify_refraction_endpoint_static_status',
     'compose_t1lsst_1layer_endpoint_component_rows',
     'compose_refraction_endpoint_field_corrections',
@@ -365,6 +383,8 @@ __all__ = [
     'compute_weathering_thickness_from_half_intercept_time',
     'compute_weathering_thickness_from_half_intercept_time_with_status',
     'compute_weathering_thickness_scalar_from_half_intercept_time',
+    'compute_weathering_replacement_shift_s',
+    'compute_weathering_replacement_shift_scalar_s',
     'compute_source_depth_weathering_time_correction',
     'compute_source_depth_weathering_time_correction_from_result',
     'compute_source_receiver_midpoints',
