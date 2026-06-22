@@ -39,13 +39,17 @@ _STATUS_PRIORITY = {
     'invalid_weathering_thickness': 9,
     'inactive': 10,
     'invalid_velocity': 11,
-    'outside_refractor_cell_grid': 12,
-    'inactive_v2_cell': 13,
-    'low_fold_v2_cell': 14,
-    'invalid_local_v2': 15,
-    'v2_not_greater_than_v1': 16,
-    'missing_endpoint': 17,
-    'missing_node': 18,
+    'invalid_nonfinite_input': 12,
+    'invalid_velocity_order': 13,
+    'invalid_surface_elevation': 14,
+    'invalid_refractor_elevation': 15,
+    'outside_refractor_cell_grid': 16,
+    'inactive_v2_cell': 17,
+    'low_fold_v2_cell': 18,
+    'invalid_local_v2': 19,
+    'v2_not_greater_than_v1': 20,
+    'missing_endpoint': 21,
+    'missing_node': 22,
 }
 
 
@@ -413,6 +417,23 @@ def _velocity_context(weathering_model: RefractionWeatheringModel) -> _VelocityC
         name='weathering_model.weathering_velocity_m_s',
         error_type=RefractionWeatheringReplacementError,
     )
+    if mode == 'solve_cell':
+        bedrock_velocity = _metadata_float(
+            weathering_model.bedrock_velocity_m_s,
+            name='weathering_model.bedrock_velocity_m_s',
+        )
+        bedrock_slowness = _metadata_float(
+            weathering_model.bedrock_slowness_s_per_m,
+            name='weathering_model.bedrock_slowness_s_per_m',
+        )
+        return _VelocityContext(
+            mode=mode,
+            bedrock_slowness_s_per_m=bedrock_slowness,
+            bedrock_velocity_m_s=bedrock_velocity,
+            weathering_velocity_m_s=weathering_velocity,
+            replacement_slowness_delta_s_per_m=float('nan'),
+        )
+
     bedrock_velocity = coerce_positive_finite_float(
         weathering_model.bedrock_velocity_m_s,
         name='weathering_model.bedrock_velocity_m_s',
@@ -525,13 +546,29 @@ def _classify_component_status(
     _assign(status, inherited == 'clipped_half_intercept_upper', 'clipped_half_intercept_upper')
     _assign(status, inherited == 'low_fold', 'low_fold')
     _assign(status, inherited == 'exceeds_max_thickness', 'exceeds_max_thickness')
+    _assign(status, inherited == 'invalid_velocity', 'invalid_velocity')
+    _assign(status, inherited == 'invalid_nonfinite_input', 'invalid_nonfinite_input')
+    _assign(status, inherited == 'invalid_velocity_order', 'invalid_velocity_order')
+    missing_thickness = ~np.isfinite(thickness)
+    _assign(
+        status,
+        missing_thickness & (inherited == 'invalid_surface_elevation'),
+        'invalid_surface_elevation',
+    )
+    _assign(
+        status,
+        missing_thickness & (inherited == 'invalid_refractor_elevation'),
+        'invalid_refractor_elevation',
+    )
 
     negative_thickness = np.isfinite(thickness) & (thickness < 0.0)
     negative_thickness |= (inherited == 'negative_thickness') | (
         inherited == 'negative_weathering_thickness'
     )
-    invalid_thickness = (~np.isfinite(thickness)) & (inherited != 'inactive')
-    invalid_thickness &= inherited != 'missing_node'
+    invalid_thickness = (~np.isfinite(thickness)) & np.isin(
+        inherited,
+        ['ok', 'zero_thickness'],
+    )
     invalid_thickness |= inherited == 'invalid_weathering_thickness'
     unknown_invalid = _unknown_invalid_weathering_status(inherited)
     invalid_shift = np.isfinite(thickness) & (thickness >= 0.0) & (~np.isfinite(shift))
@@ -564,6 +601,11 @@ def _classify_component_status(
             'invalid_local_v2',
             'v2_not_greater_than_v1',
             'inactive',
+            'invalid_surface_elevation',
+            'invalid_refractor_elevation',
+            'invalid_nonfinite_input',
+            'invalid_velocity_order',
+            'invalid_velocity',
             'invalid_weathering_thickness',
             'negative_weathering_thickness',
             'invalid_shift',
@@ -642,7 +684,8 @@ def _classify_trace_status(
     receiver = np.asarray(receiver_status).astype(str, copy=False)
     for index in range(n_traces):
         status[index] = _highest_priority_status(source[index], receiver[index])
-    _assign(status, ~np.isfinite(trace_shift_s), 'invalid_shift')
+    otherwise_ok = (source == 'ok') & (receiver == 'ok')
+    _assign(status, (~np.isfinite(trace_shift_s)) & otherwise_ok, 'invalid_shift')
     if max_abs_shift_ms is not None:
         exceeds = np.isfinite(trace_shift_s) & (
             np.abs(trace_shift_s) * 1000.0 > max_abs_shift_ms
@@ -689,10 +732,12 @@ def _build_qc(
         'static_component': 'weathering_replacement',
         'file_id': weathering_model.file_id,
         'bedrock_velocity_mode': velocity.mode,
-        'bedrock_velocity_m_s': float(velocity.bedrock_velocity_m_s),
-        'bedrock_slowness_s_per_m': float(velocity.bedrock_slowness_s_per_m),
+        'bedrock_velocity_m_s': _json_finite_float(velocity.bedrock_velocity_m_s),
+        'bedrock_slowness_s_per_m': _json_finite_float(
+            velocity.bedrock_slowness_s_per_m
+        ),
         'weathering_velocity_m_s': float(velocity.weathering_velocity_m_s),
-        'replacement_slowness_delta_s_per_m': float(
+        'replacement_slowness_delta_s_per_m': _json_finite_float(
             velocity.replacement_slowness_delta_s_per_m
         ),
         'n_traces': int(weathering_model.n_traces),
@@ -809,8 +854,11 @@ def _unknown_invalid_weathering_status(status: np.ndarray) -> np.ndarray:
             'clipped_half_intercept_lower',
             'clipped_half_intercept_upper',
             'exceeds_max_thickness',
+            'invalid_velocity',
             'invalid_surface_elevation',
             'invalid_refractor_elevation',
+            'invalid_nonfinite_input',
+            'invalid_velocity_order',
             'missing_endpoint',
             'missing_node',
             'outside_refractor_cell_grid',
@@ -821,6 +869,20 @@ def _unknown_invalid_weathering_status(status: np.ndarray) -> np.ndarray:
         ],
     )
     return ~known
+
+
+def _metadata_float(value: object, *, name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise RefractionWeatheringReplacementError(f'{name} must be numeric') from exc
+
+
+def _json_finite_float(value: float) -> float | None:
+    out = float(value)
+    if not np.isfinite(out):
+        return None
+    return out
 
 
 def _assign(status: np.ndarray, mask: np.ndarray, value: str) -> None:

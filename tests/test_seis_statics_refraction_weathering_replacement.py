@@ -9,6 +9,7 @@ import pytest
 from seis_statics.refraction.weathering import (
     RefractionWeatheringEndpointComponents,
     RefractionWeatheringModel,
+    compute_weathering_thickness_from_half_intercept_time_with_status,
 )
 from seis_statics.refraction.weathering_replacement import (
     RefractionWeatheringReplacementError,
@@ -322,6 +323,59 @@ def test_statuses_preserve_inactive_invalid_and_inherited_conditions() -> None:
     assert result.qc['exceeds_max_thickness_count'] == 1
 
 
+def test_statuses_preserve_real_weathering_builder_nan_conditions() -> None:
+    components = compute_weathering_thickness_from_half_intercept_time_with_status(
+        half_intercept_time_s=np.full(6, 0.02, dtype=np.float64),
+        surface_elevation_m=np.full(6, 100.0, dtype=np.float64),
+        v1_m_s=WEATHERING_VELOCITY_M_S,
+        v2_m_s=np.asarray(
+            [
+                BEDROCK_VELOCITY_M_S,
+                BEDROCK_VELOCITY_M_S,
+                BEDROCK_VELOCITY_M_S,
+                BEDROCK_VELOCITY_M_S,
+                WEATHERING_VELOCITY_M_S,
+                BEDROCK_VELOCITY_M_S,
+            ],
+            dtype=np.float64,
+        ),
+        solution_status=np.asarray(
+            [
+                'low_fold',
+                'clipped_half_intercept_lower',
+                'clipped_half_intercept_upper',
+                'ok',
+                'ok',
+                'inactive',
+            ],
+            dtype='<U32',
+        ),
+        max_weathering_thickness_m=1.0,
+    )
+
+    result = build_refraction_weathering_replacement_statics(
+        weathering_model=_weathering_model(
+            node_thickness=components.weathering_thickness_m,
+            node_status=components.weathering_status,
+        ),
+        max_abs_shift_ms=250.0,
+    )
+
+    assert result.node_static_status.tolist() == [
+        'low_fold',
+        'clipped_half_intercept_lower',
+        'clipped_half_intercept_upper',
+        'exceeds_max_thickness',
+        'invalid_velocity_order',
+        'inactive',
+    ]
+    assert np.isnan(result.node_weathering_replacement_shift_s).all()
+    assert 'invalid_shift' not in set(result.trace_static_status_sorted.tolist())
+    assert result.qc['low_fold_node_count'] == 1
+    assert result.qc['invalid_weathering_thickness_count'] == 0
+    assert result.qc['exceeds_max_thickness_count'] == 1
+
+
 def test_elevation_only_weathering_statuses_do_not_block_replacement_shift() -> None:
     status = np.asarray(
         [
@@ -428,6 +482,45 @@ def test_local_v2_values_and_status_overlay_are_preserved() -> None:
     assert result.receiver_static_status_sorted[2] == 'low_fold_v2_cell'
     assert np.isnan(result.node_weathering_replacement_shift_s[3])
     assert result.trace_static_valid_mask_sorted[3] == np.False_
+
+
+def test_solve_cell_replacement_uses_local_v2_without_scalar_global_v2() -> None:
+    local_v2 = np.asarray(
+        [2200.0, 2500.0, 3000.0, 2800.0, 2600.0, 2500.0],
+        dtype=np.float64,
+    )
+    weathering = replace(
+        _weathering_model(node_v2_m_s=local_v2),
+        bedrock_velocity_mode='solve_cell',
+        bedrock_velocity_m_s=float('nan'),
+        bedrock_slowness_s_per_m=float('nan'),
+        bedrock_velocity_status='cell',
+        v2_m_s=float('nan'),
+        cell_id=np.asarray([0, 1, 2], dtype=np.int64),
+        cell_v2_m_s=np.asarray([2200.0, 2500.0, 3000.0], dtype=np.float64),
+        cell_velocity_status=np.asarray(['solved', 'solved', 'solved'], dtype='<U32'),
+        cell_observation_count=np.asarray([2, 2, 2], dtype=np.int64),
+    )
+
+    result = build_refraction_weathering_replacement_statics(
+        weathering_model=weathering,
+        max_abs_shift_ms=250.0,
+    )
+
+    expected = weathering.node_weathering_thickness_m[:5] * (
+        1.0 / local_v2[:5] - 1.0 / WEATHERING_VELOCITY_M_S
+    )
+    np.testing.assert_allclose(
+        result.node_weathering_replacement_shift_s[:5],
+        expected,
+        rtol=1.0e-12,
+    )
+    assert result.bedrock_velocity_mode == 'solve_cell'
+    assert np.isnan(result.bedrock_velocity_m_s)
+    assert result.qc['bedrock_velocity_m_s'] is None
+    assert result.qc['bedrock_slowness_s_per_m'] is None
+    assert result.qc['replacement_slowness_delta_s_per_m'] is None
+    json.dumps(result.qc, allow_nan=False)
 
 
 def test_qc_summary_is_json_safe_and_contains_sign_convention() -> None:
