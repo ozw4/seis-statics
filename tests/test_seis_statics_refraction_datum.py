@@ -88,6 +88,35 @@ def test_refraction_datum_modes_compose_expected_trace_shift(
     assert result.qc['sign_convention'] == 'corrected(t) = raw(t - shift_s)'
 
 
+def test_refraction_datum_none_mode_does_not_require_replacement_velocity() -> None:
+    result = build_refraction_datum_statics(
+        **{
+            **_base_kwargs(),
+            'replacement_velocity_m_s': None,
+        },
+        mode='none',
+    )
+
+    np.testing.assert_allclose(result.refraction_trace_shift_s_sorted, [-0.016, -0.012])
+    np.testing.assert_array_equal(result.trace_static_status_sorted, ['ok', 'ok'])
+    assert result.replacement_velocity_m_s is None
+    assert np.all(np.isnan(result.source_endpoint_datum.replacement_velocity_m_s))
+    assert np.all(np.isnan(result.receiver_endpoint_datum.replacement_velocity_m_s))
+
+
+def test_refraction_datum_none_mode_ignores_invalid_replacement_velocity() -> None:
+    result = build_refraction_datum_statics(
+        **{
+            **_base_kwargs(),
+            'replacement_velocity_m_s': _values([np.nan, 0.0]),
+        },
+        mode='none',
+    )
+
+    np.testing.assert_allclose(result.refraction_trace_shift_s_sorted, [-0.016, -0.012])
+    np.testing.assert_array_equal(result.trace_static_status_sorted, ['ok', 'ok'])
+
+
 def test_refraction_datum_accepts_constant_and_array_resolved_datums() -> None:
     result = build_refraction_datum_statics(
         **_base_kwargs(),

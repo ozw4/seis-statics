@@ -7,7 +7,6 @@ import pytest
 
 from seis_statics.refraction import (
     RefractionEndpointTable,
-    RefractionMultilayerTimeTermSolverError,
     RefractionStaticFirstLayerOptions,
     RefractionStaticInputModel,
     RefractionStaticLayerOptions,
@@ -132,7 +131,7 @@ def test_multilayer_solver_combines_enabled_layer_trace_arrays() -> None:
         )
 
 
-def test_multilayer_solver_rejects_invalid_deeper_velocity_order() -> None:
+def test_multilayer_solver_marks_invalid_deeper_velocity_order_rows() -> None:
     input_model = _three_layer_input_model(layer_count=2)
     model = _three_layer_model(
         RefractionStaticLayerOptions(
@@ -151,15 +150,39 @@ def test_multilayer_solver_rejects_invalid_deeper_velocity_order() -> None:
         ),
     )
 
-    with pytest.raises(
-        RefractionMultilayerTimeTermSolverError,
-        match='v3_t2 velocity must be greater',
-    ):
-        solve_refraction_multilayer_time_terms(
-            input_model=input_model,
-            model=model,
-            solver_options=_solver_options(),
-        )
+    result = solve_refraction_multilayer_time_terms(
+        input_model=input_model,
+        model=model,
+        solver_options=_solver_options(),
+    )
+
+    invalid_order_rows = np.arange(12, 24)
+    np.testing.assert_array_equal(
+        result.used_observation_mask_sorted,
+        np.asarray([True] * 12 + [False] * 12),
+    )
+    np.testing.assert_array_equal(
+        result.rejected_observation_mask_sorted,
+        np.asarray([False] * 12 + [True] * 12),
+    )
+    np.testing.assert_array_equal(
+        result.rejection_reason_sorted[invalid_order_rows],
+        np.asarray(['invalid_velocity_order'] * 12),
+    )
+    np.testing.assert_array_equal(
+        result.layer_kind_sorted,
+        np.asarray(['v2_t1'] * 12 + ['v3_t2'] * 12),
+    )
+
+    layer = result.layer_result_by_kind['v3_t2']
+    assert not np.any(layer.solve_result.used_observation_mask_sorted[invalid_order_rows])
+    assert np.all(layer.solve_result.rejected_observation_mask_sorted[invalid_order_rows])
+    np.testing.assert_array_equal(
+        layer.rejection_reason_sorted[invalid_order_rows],
+        np.asarray(['invalid_velocity_order'] * 12),
+    )
+    assert result.qc['n_used_observations'] == 12
+    assert result.qc['n_rejected_observations'] == 12
 
 
 def test_multilayer_solver_preserves_layer_and_robust_rejection_reasons() -> None:

@@ -182,9 +182,9 @@ def solve_refraction_multilayer_time_terms(
             solve_result=solve_result,
             velocity_order_valid_mask=order_valid,
         )
-        if not np.all(order_valid[solve_result.used_observation_mask_sorted]):
-            raise RefractionMultilayerTimeTermSolverError(
-                f'{layer.kind} velocity must be greater than the prior layer velocity'
+        solve_result = _apply_velocity_order_rejections(
+            solve_result=solve_result,
+            velocity_order_valid_mask=order_valid,
         )
         layer_result = RefractionMultilayerTimeTermLayerResult(
             layer_kind=layer.kind,
@@ -419,6 +419,51 @@ def _velocity_order_valid_mask(
     return np.ascontiguousarray(valid, dtype=bool)
 
 
+def _apply_velocity_order_rejections(
+    *,
+    solve_result: RefractionStaticSolveResult,
+    velocity_order_valid_mask: np.ndarray,
+) -> RefractionStaticSolveResult:
+    invalid_velocity = (
+        solve_result.used_observation_mask_sorted & ~velocity_order_valid_mask
+    )
+    if not np.any(invalid_velocity):
+        return solve_result
+
+    used = np.asarray(solve_result.used_observation_mask_sorted, dtype=bool).copy()
+    rejected = np.asarray(
+        solve_result.rejected_observation_mask_sorted,
+        dtype=bool,
+    ).copy()
+    used[invalid_velocity] = False
+    rejected[invalid_velocity] = True
+
+    used_residual = solve_result.residual_s_sorted[
+        used & np.isfinite(solve_result.residual_s_sorted)
+    ]
+    rms_s = (
+        float(np.sqrt(np.mean(np.square(used_residual))))
+        if used_residual.size > 0
+        else float('nan')
+    )
+    qc = dict(solve_result.qc)
+    qc['n_final_used_observations'] = int(np.count_nonzero(used))
+    qc['n_rejected_observations'] = int(np.count_nonzero(rejected))
+    qc['n_final_rejected_observations'] = int(np.count_nonzero(rejected))
+    qc['rms_residual_ms'] = rms_s * 1000.0
+
+    return replace(
+        solve_result,
+        used_observation_mask_sorted=np.ascontiguousarray(used),
+        rejected_observation_mask_sorted=np.ascontiguousarray(rejected),
+        rms_residual_s=rms_s,
+        rms_residual_ms=float(rms_s * 1000.0),
+        n_final_used_observations=int(np.count_nonzero(used)),
+        n_rejected_observations=int(np.count_nonzero(rejected)),
+        qc=qc,
+    )
+
+
 def _layer_rejection_reason(
     *,
     layer_masks: RefractionLayerObservationMasks,
@@ -432,9 +477,12 @@ def _layer_rejection_reason(
     ).copy()
     robust_rejected = solve_result.rejected_observation_mask_sorted
     reason[robust_rejected] = ROBUST_REJECTION_REASON
-    invalid_velocity = solve_result.used_observation_mask_sorted & ~velocity_order_valid_mask
+    invalid_velocity = (
+        solve_result.used_observation_mask_sorted & ~velocity_order_valid_mask
+    )
     reason[invalid_velocity] = VELOCITY_ORDER_REJECTION_REASON
-    reason[solve_result.used_observation_mask_sorted] = ''
+    solved = solve_result.used_observation_mask_sorted & velocity_order_valid_mask
+    reason[solved] = ''
     return np.ascontiguousarray(reason)
 
 

@@ -207,7 +207,7 @@ def build_refraction_endpoint_datum_statics(
     weathering_replacement_shift_s: np.ndarray,
     weathering_replacement_status: np.ndarray,
     mode: RefractionStaticDatumMode,
-    replacement_velocity_m_s: np.ndarray | float,
+    replacement_velocity_m_s: np.ndarray | float | None = None,
     floating_datum_elevation_m: np.ndarray | float | None = None,
     flat_datum_elevation_m: np.ndarray | float | None = None,
     allow_flat_datum_above_topography: bool = True,
@@ -224,6 +224,7 @@ def build_refraction_endpoint_datum_statics(
         replacement_velocity_m_s,
         name=f'{kind}_replacement_velocity_m_s',
         expected_shape=(endpoint_count,),
+        allow_none=datum_mode == 'none',
         require_all_finite=False,
     )
     ids = _coerce_optional_endpoint_ids(
@@ -416,6 +417,7 @@ def build_refraction_datum_statics(
         replacement_velocity_m_s=replacement_velocity_m_s,
         source_replacement_velocity_m_s=source_replacement_velocity_m_s,
         receiver_replacement_velocity_m_s=receiver_replacement_velocity_m_s,
+        required=datum_mode != 'none',
     )
 
     source = build_refraction_endpoint_datum_statics(
@@ -618,7 +620,10 @@ def _endpoint_status(
         return 'invalid_refractor_elevation'
     if not np.isfinite(replacement_shift_s):
         return 'invalid_datum_shift'
-    if (not np.isfinite(replacement_velocity_m_s)) or replacement_velocity_m_s <= 0.0:
+    if mode != 'none' and (
+        (not np.isfinite(replacement_velocity_m_s))
+        or replacement_velocity_m_s <= 0.0
+    ):
         return 'invalid_velocity'
     if mode in {'floating_only', 'floating_and_flat'}:
         if not np.isfinite(floating_datum_elevation_m):
@@ -685,7 +690,8 @@ def _replacement_velocity_inputs(
     replacement_velocity_m_s: np.ndarray | float | None,
     source_replacement_velocity_m_s: np.ndarray | float | None,
     receiver_replacement_velocity_m_s: np.ndarray | float | None,
-) -> tuple[np.ndarray | float, np.ndarray | float]:
+    required: bool,
+) -> tuple[np.ndarray | float | None, np.ndarray | float | None]:
     has_shared = replacement_velocity_m_s is not None
     has_endpoint = (
         source_replacement_velocity_m_s is not None
@@ -697,28 +703,37 @@ def _replacement_velocity_inputs(
         )
     if has_shared:
         return replacement_velocity_m_s, replacement_velocity_m_s
-    if (
-        source_replacement_velocity_m_s is None
-        or receiver_replacement_velocity_m_s is None
-    ):
+    if source_replacement_velocity_m_s is None and receiver_replacement_velocity_m_s is None:
+        if not required:
+            return None, None
+        raise RefractionDatumError('replacement_velocity_m_s is required')
+    if source_replacement_velocity_m_s is None or receiver_replacement_velocity_m_s is None:
         raise RefractionDatumError('replacement_velocity_m_s is required')
     return source_replacement_velocity_m_s, receiver_replacement_velocity_m_s
 
 
 def _coerce_replacement_velocity(
-    value: np.ndarray | float,
+    value: np.ndarray | float | None,
     *,
     name: str,
     expected_shape: tuple[int, ...],
+    allow_none: bool = False,
     require_all_finite: bool,
 ) -> np.ndarray:
+    if value is None:
+        if allow_none:
+            return np.full(expected_shape, np.nan, dtype=np.float64)
+        raise RefractionDatumError(f'{name} is required for datum mode')
     arr = np.asarray(value)
     if arr.ndim == 0:
-        scalar = _coerce_positive_finite_float(
-            value,
-            name=name,
-            error_type=RefractionDatumError,
-        )
+        if require_all_finite:
+            scalar = _coerce_positive_finite_float(
+                value,
+                name=name,
+                error_type=RefractionDatumError,
+            )
+        else:
+            scalar = float(arr)
         return np.full(expected_shape, scalar, dtype=np.float64)
     velocity = _coerce_1d_float(value, name=name, expected_shape=expected_shape)
     invalid = (~np.isfinite(velocity)) | (velocity <= 0.0)
