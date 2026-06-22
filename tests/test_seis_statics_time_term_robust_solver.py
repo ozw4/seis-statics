@@ -93,7 +93,7 @@ def _matrix(
 def _options(**overrides: Any) -> TimeTermSparseSolverOptions:
     payload: dict[str, Any] = {
         'damping_lambda': 0.0,
-        'gauge': 'mean_zero',
+        'gauge': 'auto_component',
         'solver': 'lsmr',
         'atol': 1.0e-12,
         'btol': 1.0e-12,

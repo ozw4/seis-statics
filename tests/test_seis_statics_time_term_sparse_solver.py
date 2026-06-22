@@ -123,18 +123,17 @@ def test_time_term_solver_system_contains_observation_damping_and_gauge_rows() -
         _design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.5,
-            gauge='reference_node',
+            gauge='auto_component',
             gauge_weight=2.0,
-            reference_node_id=1,
         ),
     )
 
     assert sparse.isspmatrix_csr(system.augmented_matrix)
     assert system.n_observation_rows == 4
     assert system.n_damping_rows == 3
-    assert system.n_gauge_rows == 1
-    assert system.n_augmented_rows == 8
-    assert system.augmented_matrix.shape == (8, 3)
+    assert system.n_gauge_rows == 0
+    assert system.n_augmented_rows == 7
+    assert system.augmented_matrix.shape == (7, 3)
     np.testing.assert_allclose(
         system.augmented_matrix[:4].toarray(),
         OBSERVATION_MATRIX.toarray(),
@@ -185,92 +184,68 @@ def test_time_term_solver_system_uses_array_damping_prior() -> None:
     np.testing.assert_allclose(system.augmented_data_s[4:7], 0.5 * prior)
 
 
-def test_time_term_solver_system_adds_mean_zero_gauge_row() -> None:
+def test_time_term_solver_system_adds_auto_component_signed_gauge_rows() -> None:
     system = build_time_term_solver_system(
-        _design(),
+        _disconnected_design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.0,
-            gauge='mean_zero',
+            gauge='auto_component',
             gauge_weight=2.0,
         ),
     )
 
     assert system.n_damping_rows == 0
-    assert system.n_gauge_rows == 1
+    assert system.n_gauge_rows == 2
     np.testing.assert_allclose(
-        system.augmented_matrix[-1].toarray().ravel(),
-        np.full(3, 2.0 / np.sqrt(3.0), dtype=np.float64),
+        system.augmented_matrix[-2:].toarray(),
+        [
+            [2.0 / np.sqrt(2.0), -2.0 / np.sqrt(2.0), 0.0, 0.0],
+            [0.0, 0.0, 2.0 / np.sqrt(2.0), -2.0 / np.sqrt(2.0)],
+        ],
     )
-    assert system.augmented_data_s[-1] == 0.0
+    np.testing.assert_allclose(system.augmented_data_s[-2:], 0.0)
 
 
-def test_time_term_solver_system_adds_reference_node_gauge_row() -> None:
+def test_time_term_solver_system_skips_auto_component_gauge_for_nonbipartite_graph() -> None:
     system = build_time_term_solver_system(
         _design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.0,
-            gauge='reference_node',
-            gauge_weight=3.0,
-            reference_node_id=2,
+            gauge='auto_component',
         ),
     )
 
-    np.testing.assert_allclose(
-        system.augmented_matrix[-1].toarray().ravel(),
-        [0.0, 0.0, 3.0],
-    )
-    assert system.reference_node_id == 2
+    assert system.n_gauge_rows == 0
+    assert system.n_bipartite_components == 0
 
 
-def test_time_term_solver_system_adds_component_mean_zero_gauge_rows() -> None:
+def test_time_term_solver_system_none_zero_damping_allows_nonbipartite_graph() -> None:
     system = build_time_term_solver_system(
-        _disconnected_design(),
+        _design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.0,
-            gauge='component_mean_zero',
-            gauge_weight=2.0,
+            gauge='none',
         ),
     )
 
-    assert system.n_components == 2
-    np.testing.assert_array_equal(system.component_id_by_node, [0, 0, 1, 1])
-    np.testing.assert_allclose(
-        system.augmented_matrix[-2:].toarray(),
-        [
-            [2.0 / np.sqrt(2.0), 2.0 / np.sqrt(2.0), 0.0, 0.0],
-            [0.0, 0.0, 2.0 / np.sqrt(2.0), 2.0 / np.sqrt(2.0)],
-        ],
-    )
+    assert system.n_gauge_rows == 0
+    assert system.n_bipartite_components == 0
 
 
-@pytest.mark.parametrize('gauge', ['mean_zero', 'reference_node'])
-def test_time_term_solver_system_rejects_disconnected_zero_damping_single_gauge(
-    gauge: str,
-) -> None:
-    with pytest.raises(ValueError, match='disconnected'):
+def test_time_term_solver_system_rejects_none_zero_damping_for_bipartite_graph() -> None:
+    with pytest.raises(ValueError, match='zero damping'):
         build_time_term_solver_system(
             _disconnected_design(),
-            options=TimeTermSparseSolverOptions(damping_lambda=0.0, gauge=gauge),
-        )
-
-
-def test_time_term_solver_system_rejects_zero_damping_without_gauge() -> None:
-    with pytest.raises(ValueError, match='damping_lambda'):
-        build_time_term_solver_system(
-            _design(),
             options=TimeTermSparseSolverOptions(damping_lambda=0.0, gauge='none'),
         )
 
 
-def test_time_term_solver_system_rejects_invalid_reference_node() -> None:
-    with pytest.raises(ValueError, match='reference_node_id'):
+@pytest.mark.parametrize('gauge', ['mean_zero', 'component_mean_zero', 'reference_node'])
+def test_time_term_solver_system_rejects_legacy_gauge_modes(gauge: str) -> None:
+    with pytest.raises(ValueError, match='unsupported gauge'):
         build_time_term_solver_system(
             _design(),
-            options=TimeTermSparseSolverOptions(
-                damping_lambda=0.0,
-                gauge='reference_node',
-                reference_node_id=3,
-            ),
+            options=TimeTermSparseSolverOptions(gauge=gauge),  # type: ignore[arg-type]
         )
 
 
@@ -284,7 +259,7 @@ def test_time_term_solver_system_allows_unobserved_node_when_configured() -> Non
         _unobserved_node_design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.01,
-            gauge='component_mean_zero',
+            gauge='auto_component',
             require_all_nodes_observed=False,
             min_total_observations_per_node=0,
         ),
@@ -382,7 +357,7 @@ def test_time_term_sparse_solver_unsupported_endpoint_prediction_stays_nan() -> 
         _unobserved_node_design(),
         options=_accurate_options(
             damping_lambda=0.01,
-            gauge='component_mean_zero',
+            gauge='auto_component',
             require_all_nodes_observed=False,
             min_total_observations_per_node=0,
         ),
