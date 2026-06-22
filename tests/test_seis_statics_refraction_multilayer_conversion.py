@@ -128,6 +128,126 @@ def test_multilayer_3layer_datum_facade_composes_flat_final_shift() -> None:
     np.testing.assert_array_equal(result.datum.trace_static_status_sorted, ['ok'] * 30)
 
 
+@pytest.mark.parametrize(
+    ('mode', 'flat_datum_elevation_m', 'datum_shift_s'),
+    [
+        ('floating_only', None, 0.0),
+        ('floating_and_flat', 80.0, -20.0 / VSUB_M_S),
+    ],
+)
+def test_multilayer_3layer_datum_facade_composes_floating_modes(
+    mode: str,
+    flat_datum_elevation_m: float | None,
+    datum_shift_s: float,
+) -> None:
+    input_model = _input_model(layer_count=3, elevation_m=100.0)
+    expected = compute_t1lsst_3layer_thicknesses_with_status(
+        t1_s=T1_S,
+        t2_s=T2_S,
+        t3_s=T3_S,
+        v1_m_s=V1_M_S,
+        v2_m_s=V2_M_S,
+        v3_m_s=V3_M_S,
+        vsub_m_s=VSUB_M_S,
+    )
+
+    result = compute_refraction_multilayer_datum_statics_from_input_model(
+        input_model=input_model,
+        model=_model(layer_count=3),
+        datum_options=RefractionStaticDatumOptions(
+            mode=mode,
+            floating_datum_mode='surface',
+            flat_datum_elevation_m=flat_datum_elevation_m,
+        ),
+        solver_options=_solver_options(),
+    )
+
+    np.testing.assert_allclose(
+        result.datum.source_endpoint_datum.floating_datum_shift_s,
+        0.0,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        result.datum.receiver_endpoint_datum.floating_datum_shift_s,
+        0.0,
+        atol=1.0e-12,
+    )
+    expected_endpoint_total = expected.weathering_correction_s + datum_shift_s
+    np.testing.assert_allclose(
+        result.datum.final_trace_shift_s_sorted,
+        expected_endpoint_total[input_model.source_node_id_sorted]
+        + expected_endpoint_total[input_model.receiver_node_id_sorted],
+        atol=1.0e-9,
+    )
+    np.testing.assert_array_equal(result.datum.trace_static_status_sorted, ['ok'] * 30)
+
+
+def test_multilayer_datum_facade_smooths_topography_in_node_order() -> None:
+    node_elevation_m = np.asarray([100.0, 115.0, 90.0, 110.0, 95.0], dtype=np.float64)
+    input_model = _with_node_elevation(
+        _input_model(layer_count=3),
+        node_elevation_m,
+    )
+    reordered = _reorder_input_model(
+        input_model,
+        np.arange(input_model.n_traces - 1, -1, -1, dtype=np.int64),
+    )
+    datum_options = RefractionStaticDatumOptions(
+        mode='floating_only',
+        floating_datum_mode='smoothed_topography',
+        smoothing_window_nodes=3,
+    )
+
+    result = compute_refraction_multilayer_datum_statics_from_input_model(
+        input_model=input_model,
+        model=_model(layer_count=3),
+        datum_options=datum_options,
+        solver_options=_solver_options(),
+    )
+    reordered_result = compute_refraction_multilayer_datum_statics_from_input_model(
+        input_model=reordered,
+        model=_model(layer_count=3),
+        datum_options=datum_options,
+        solver_options=_solver_options(),
+    )
+
+    np.testing.assert_allclose(
+        _values_by_node(
+            result.conversion.source_endpoint.node_id,
+            result.datum.source_endpoint_datum.floating_datum_elevation_m,
+        ),
+        _values_by_node(
+            reordered_result.conversion.source_endpoint.node_id,
+            reordered_result.datum.source_endpoint_datum.floating_datum_elevation_m,
+        ),
+    )
+    np.testing.assert_allclose(
+        _values_by_node(
+            result.conversion.receiver_endpoint.node_id,
+            result.datum.receiver_endpoint_datum.floating_datum_elevation_m,
+        ),
+        _values_by_node(
+            reordered_result.conversion.receiver_endpoint.node_id,
+            reordered_result.datum.receiver_endpoint_datum.floating_datum_elevation_m,
+        ),
+    )
+    np.testing.assert_allclose(
+        _trace_order_values(input_model, result.datum.final_trace_shift_s_sorted),
+        _trace_order_values(
+            reordered,
+            reordered_result.datum.final_trace_shift_s_sorted,
+        ),
+        equal_nan=True,
+    )
+    np.testing.assert_array_equal(
+        _trace_order_values(input_model, result.datum.trace_static_status_sorted),
+        _trace_order_values(
+            reordered,
+            reordered_result.datum.trace_static_status_sorted,
+        ),
+    )
+
+
 def test_multilayer_datum_facade_uses_endpoint_replacement_velocities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -493,6 +613,72 @@ def _input_model(*, layer_count: int, elevation_m: float = 0.0) -> RefractionSta
         endpoint_table=endpoint_table,
         metadata={},
     )
+
+
+def _with_node_elevation(
+    input_model: RefractionStaticInputModel,
+    node_elevation_m: np.ndarray,
+) -> RefractionStaticInputModel:
+    elevation = np.ascontiguousarray(node_elevation_m, dtype=np.float64)
+    return replace(
+        input_model,
+        source_elevation_m_sorted=elevation[input_model.source_node_id_sorted],
+        receiver_elevation_m_sorted=elevation[input_model.receiver_node_id_sorted],
+        node_elevation_m=elevation,
+        endpoint_table=replace(input_model.endpoint_table, elevation_m=elevation),
+    )
+
+
+def _reorder_input_model(
+    input_model: RefractionStaticInputModel,
+    order: np.ndarray,
+) -> RefractionStaticInputModel:
+    def take(value: np.ndarray | None) -> np.ndarray | None:
+        if value is None:
+            return None
+        return np.ascontiguousarray(value[order])
+
+    return replace(
+        input_model,
+        sorted_trace_index=take(input_model.sorted_trace_index),
+        pick_time_s_sorted=take(input_model.pick_time_s_sorted),
+        valid_pick_mask_sorted=take(input_model.valid_pick_mask_sorted),
+        valid_observation_mask_sorted=take(input_model.valid_observation_mask_sorted),
+        source_id_sorted=take(input_model.source_id_sorted),
+        receiver_id_sorted=take(input_model.receiver_id_sorted),
+        source_x_m_sorted=take(input_model.source_x_m_sorted),
+        source_y_m_sorted=take(input_model.source_y_m_sorted),
+        receiver_x_m_sorted=take(input_model.receiver_x_m_sorted),
+        receiver_y_m_sorted=take(input_model.receiver_y_m_sorted),
+        source_elevation_m_sorted=take(input_model.source_elevation_m_sorted),
+        receiver_elevation_m_sorted=take(input_model.receiver_elevation_m_sorted),
+        source_depth_m_sorted=take(input_model.source_depth_m_sorted),
+        geometry_distance_m_sorted=take(input_model.geometry_distance_m_sorted),
+        offset_m_sorted=take(input_model.offset_m_sorted),
+        distance_m_sorted=take(input_model.distance_m_sorted),
+        source_endpoint_key_sorted=take(input_model.source_endpoint_key_sorted),
+        receiver_endpoint_key_sorted=take(input_model.receiver_endpoint_key_sorted),
+        source_node_id_sorted=take(input_model.source_node_id_sorted),
+        receiver_node_id_sorted=take(input_model.receiver_node_id_sorted),
+        rejection_reason_sorted=take(input_model.rejection_reason_sorted),
+        source_endpoint_id_sorted=take(input_model.source_endpoint_id_sorted),
+        receiver_endpoint_id_sorted=take(input_model.receiver_endpoint_id_sorted),
+    )
+
+
+def _values_by_node(node_id: np.ndarray, values: np.ndarray) -> np.ndarray:
+    order = np.argsort(node_id, kind='stable')
+    return np.ascontiguousarray(np.asarray(values)[order])
+
+
+def _trace_order_values(
+    input_model: RefractionStaticInputModel,
+    values: np.ndarray,
+) -> np.ndarray:
+    value_array = np.asarray(values)
+    out = np.empty(input_model.n_traces, dtype=value_array.dtype)
+    out[np.asarray(input_model.sorted_trace_index, dtype=np.int64)] = value_array
+    return out
 
 
 def _endpoint_table(

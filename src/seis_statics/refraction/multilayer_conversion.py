@@ -865,13 +865,13 @@ def _resolve_floating_datum(
     if mode == 'smoothed_topography':
         window = 1 if options.smoothing_window_nodes is None else options.smoothing_window_nodes
         return ResolvedFloatingDatum(
-            source_elevation_m=smooth_refraction_floating_datum_elevation(
-                conversion.source_endpoint.surface_elevation_m,
+            source_elevation_m=_smooth_endpoint_topography(
+                conversion.source_endpoint,
                 window_nodes=window,
                 method=options.smoothing_method,
             ),
-            receiver_elevation_m=smooth_refraction_floating_datum_elevation(
-                conversion.receiver_endpoint.surface_elevation_m,
+            receiver_elevation_m=_smooth_endpoint_topography(
+                conversion.receiver_endpoint,
                 window_nodes=window,
                 method=options.smoothing_method,
             ),
@@ -879,6 +879,30 @@ def _resolve_floating_datum(
     raise RefractionMultilayerConversionError(
         f'unsupported floating datum mode: {mode!r}'
     )
+
+
+def _smooth_endpoint_topography(
+    endpoint: RefractionMultilayerEndpointConversion,
+    *,
+    window_nodes: int,
+    method: Literal['moving_average', 'median'],
+) -> np.ndarray:
+    order = _endpoint_topography_order(endpoint)
+    smoothed = smooth_refraction_floating_datum_elevation(
+        endpoint.surface_elevation_m[order],
+        window_nodes=window_nodes,
+        method=method,
+    )
+    out = np.empty_like(smoothed)
+    out[order] = smoothed
+    return np.ascontiguousarray(out, dtype=np.float64)
+
+
+def _endpoint_topography_order(
+    endpoint: RefractionMultilayerEndpointConversion,
+) -> np.ndarray:
+    keys = np.asarray([str(key) for key in endpoint.endpoint_key.tolist()])
+    return np.lexsort((keys, endpoint.y_m, endpoint.x_m, endpoint.node_id))
 
 
 def _replacement_velocity(
