@@ -11,6 +11,11 @@ import numpy as np
 BedrockVelocityMode = Literal['solve_global', 'fixed_global', 'solve_cell']
 RefractionFirstLayerMode = Literal['constant', 'estimate_direct_arrival']
 RefractionLayerKind = Literal['v2_t1', 'v3_t2', 'vsub_t3']
+RefractionLayerAssignmentPolicy = Literal[
+    'reject_overlap',
+    'exclusive_shallowest',
+    'independent',
+]
 RefractionLayerVelocityMode = BedrockVelocityMode
 RefractionSourceDepthMode = Literal['none', 'weathering_velocity_time']
 RefractionSourceDepthStatus = Literal[
@@ -68,6 +73,7 @@ class RefractionEndpointTable:
 class RefractionLayerObservationMasks:
     """Per-layer sorted-observation masks for multi-layer refraction branches."""
 
+    assignment_policy: RefractionLayerAssignmentPolicy
     layer_kind: np.ndarray
     layer_enabled: np.ndarray
     layer_min_offset_m: np.ndarray
@@ -76,6 +82,10 @@ class RefractionLayerObservationMasks:
     layer_rejection_reason_sorted: dict[str, np.ndarray]
     layer_candidate_count: dict[str, int]
     layer_observation_count: dict[str, int]
+    overlapping_valid_observation_count: int
+    unassigned_valid_observation_count: int
+    unique_used_trace_count: int
+    layer_membership_total_count: int
 
 
 @dataclass(frozen=True)

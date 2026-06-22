@@ -18,6 +18,7 @@ from seis_statics.validation import (
 from seis_statics.refraction.types import (
     BedrockVelocityMode,
     RefractionFirstLayerMode,
+    RefractionLayerAssignmentPolicy,
     RefractionLayerKind,
     RefractionLayerVelocityMode,
 )
@@ -27,6 +28,7 @@ RefractionStaticMethod = Literal['gli_variable_thickness', 'multilayer_time_term
 RefractionStaticMoveoutModel = Literal['head_wave_linear_offset']
 RefractionStaticDistanceSource = Literal['geometry', 'offset_header', 'auto']
 RefractionStaticLayerKind = RefractionLayerKind
+RefractionStaticLayerAssignmentPolicy = RefractionLayerAssignmentPolicy
 RefractionStaticLayerVelocityMode = RefractionLayerVelocityMode
 RefractionStaticRefractorCellAssignmentMode = Literal['midpoint']
 RefractionStaticRefractorCellOutsideGridPolicy = Literal['reject']
@@ -176,7 +178,7 @@ class RefractionStaticModelOptions:
     max_weathering_thickness_m: float | None = None
     refractor_cell: RefractionStaticRefractorCellOptions | None = None
     layers: tuple[RefractionStaticLayerOptions, ...] | None = None
-    allow_overlapping_layer_gates: bool = False
+    layer_assignment_policy: RefractionLayerAssignmentPolicy = 'reject_overlap'
 
     def __post_init__(self) -> None:
         _set(self, 'method', _literal(self.method, {'gli_variable_thickness', 'multilayer_time_term'}, 'model.method'))
@@ -187,7 +189,7 @@ class RefractionStaticModelOptions:
         _set_positive_float(self, 'min_bedrock_velocity_m_s', 'model.min_bedrock_velocity_m_s')
         _set_positive_float(self, 'max_bedrock_velocity_m_s', 'model.max_bedrock_velocity_m_s')
         _set_optional_positive_float(self, 'max_weathering_thickness_m', 'model.max_weathering_thickness_m')
-        _set(self, 'allow_overlapping_layer_gates', _bool(self.allow_overlapping_layer_gates, 'model.allow_overlapping_layer_gates'))
+        _set(self, 'layer_assignment_policy', _literal(self.layer_assignment_policy, {'reject_overlap', 'exclusive_shallowest', 'independent'}, 'model.layer_assignment_policy'))
         if self.layers is not None:
             _set(self, 'layers', tuple(self.layers))
 
@@ -295,7 +297,7 @@ class RefractionStaticModelOptions:
             if layer.max_offset_m is None and _REFRACTION_STATIC_LAYER_ORDER[layer.kind] != deepest_enabled_order:
                 raise ValueError('model.layers.max_offset_m may be null only for the deepest enabled layer')
             self._check_multilayer_velocity_layer(layer, resolved_weathering_velocity=resolved_weathering_velocity)
-        if not self.allow_overlapping_layer_gates:
+        if self.layer_assignment_policy == 'reject_overlap':
             self._check_multilayer_layer_gate_overlap(enabled_layers)
         has_enabled_solve_cell_layer = any(layer.enabled and layer.velocity_mode == 'solve_cell' for layer in layers)
         if has_enabled_solve_cell_layer and self.refractor_cell is None:
@@ -342,7 +344,7 @@ class RefractionStaticModelOptions:
                 other_min = float('-inf') if other.min_offset_m is None else other.min_offset_m
                 other_max = float('inf') if other.max_offset_m is None else other.max_offset_m
                 if max(layer_min, other_min) < min(layer_max, other_max):
-                    raise ValueError('model.layers offset gates must not overlap unless model.allow_overlapping_layer_gates is true')
+                    raise ValueError('model.layers offset gates must not overlap when model.layer_assignment_policy is reject_overlap')
 
     def _layer_initial_velocity_m_s(self, layer: RefractionStaticLayerOptions) -> float | None:
         if layer.initial_velocity_m_s is not None:
@@ -584,6 +586,7 @@ __all__ = [
     'RefractionStaticFirstLayerOptions',
     'RefractionStaticFloatingDatumMode',
     'RefractionStaticLayerKind',
+    'RefractionStaticLayerAssignmentPolicy',
     'RefractionStaticMethod',
     'RefractionStaticModelOptions',
     'RefractionStaticMoveoutModel',

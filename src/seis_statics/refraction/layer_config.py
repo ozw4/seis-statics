@@ -8,7 +8,11 @@ from seis_statics.refraction.options import (
     RefractionStaticLayerOptions,
     RefractionStaticModelOptions,
 )
-from seis_statics.refraction.types import RefractionLayerKind, RefractionLayerVelocityMode
+from seis_statics.refraction.types import (
+    RefractionLayerAssignmentPolicy,
+    RefractionLayerKind,
+    RefractionLayerVelocityMode,
+)
 from seis_statics.validation import (
     coerce_nonnegative_finite_float,
     coerce_positive_finite_float,
@@ -67,14 +71,29 @@ class RefractionLayerConfigLayer:
 
 @dataclass(frozen=True)
 class RefractionLayerConfig:
-    """Validated enabled refraction layers with observation gates."""
+    """Validated enabled refraction layers with explicit gate assignment policy.
+
+    Offset gates are absolute-offset half-open intervals ``[min_offset_m,
+    max_offset_m)``. The policy makes overlap handling explicit: reject
+    overlap at configuration time, assign to the first matching layer, or let
+    each layer use all matching valid observations independently.
+    """
 
     layers: tuple[RefractionLayerConfigLayer, ...]
-    allow_overlapping_layer_gates: bool = False
+    assignment_policy: RefractionLayerAssignmentPolicy = 'reject_overlap'
 
     def __post_init__(self) -> None:
         layers = tuple(self.layers)
         object.__setattr__(self, 'layers', layers)
+        if self.assignment_policy not in {
+            'reject_overlap',
+            'exclusive_shallowest',
+            'independent',
+        }:
+            raise ValueError(
+                'layer config assignment_policy must be reject_overlap, '
+                'exclusive_shallowest, or independent'
+            )
         if not layers:
             raise ValueError('layer config must contain at least one layer')
         seen_kinds: set[RefractionLayerKind] = set()
@@ -91,7 +110,7 @@ class RefractionLayerConfig:
             raise ValueError('layer config must include v2_t1')
         if 'vsub_t3' in seen_kinds and 'v3_t2' not in seen_kinds:
             raise ValueError('layer config cannot include vsub_t3 unless v3_t2 is included')
-        if not self.allow_overlapping_layer_gates:
+        if self.assignment_policy == 'reject_overlap':
             _validate_non_overlapping_gates(layers)
 
     @property
@@ -113,7 +132,7 @@ def normalize_refraction_layer_config(
         )
         return RefractionLayerConfig(
             layers=layers,
-            allow_overlapping_layer_gates=model.allow_overlapping_layer_gates,
+            assignment_policy=model.layer_assignment_policy,
         )
     refractor_cell = model.refractor_cell
     return RefractionLayerConfig(
@@ -137,6 +156,7 @@ def normalize_refraction_layer_config(
                 ),
             ),
         ),
+        assignment_policy=model.layer_assignment_policy,
     )
 
 
@@ -144,7 +164,7 @@ def layer_offset_gate_contains(
     layer: RefractionLayerConfigLayer,
     offset_abs_m: float,
 ) -> bool:
-    """Return true when an absolute offset is inside a layer gate."""
+    """Return true when an absolute offset is inside ``[min_offset_m, max_offset_m)``."""
     if layer.min_offset_m is not None and offset_abs_m < layer.min_offset_m:
         return False
     if layer.max_offset_m is not None and offset_abs_m >= layer.max_offset_m:
@@ -226,7 +246,7 @@ def _validate_non_overlapping_gates(
             if max(layer_min, other_min) < min(layer_max, other_max):
                 raise ValueError(
                     'layer config offset gates must not overlap unless '
-                    'allow_overlapping_layer_gates is true'
+                    'assignment_policy is exclusive_shallowest or independent'
                 )
 
 
