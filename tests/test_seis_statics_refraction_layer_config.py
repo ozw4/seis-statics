@@ -196,6 +196,26 @@ def test_refraction_layer_config_rejects_invalid_bounds_and_overlap() -> None:
             ),
             RefractionLayerConfigLayer(
                 kind='v3_t2',
+                min_offset_m=499.9,
+                max_offset_m=None,
+                velocity_mode='solve_global',
+            ),
+        ),
+        assignment_policy='exclusive_shallowest',
+    )
+
+    assert config.assignment_policy == 'exclusive_shallowest'
+
+    config = RefractionLayerConfig(
+        layers=(
+            RefractionLayerConfigLayer(
+                kind='v2_t1',
+                min_offset_m=0.0,
+                max_offset_m=500.0,
+                velocity_mode='solve_global',
+            ),
+            RefractionLayerConfigLayer(
+                kind='v3_t2',
                 min_offset_m=500.0,
                 max_offset_m=None,
                 velocity_mode='solve_global',
@@ -204,3 +224,76 @@ def test_refraction_layer_config_rejects_invalid_bounds_and_overlap() -> None:
     )
 
     assert config.layer_count == 2
+
+
+def test_refraction_layer_config_allows_half_open_contact_gates() -> None:
+    config = RefractionLayerConfig(
+        layers=(
+            RefractionLayerConfigLayer(
+                kind='v2_t1',
+                min_offset_m=0.0,
+                max_offset_m=500.0,
+                velocity_mode='solve_global',
+            ),
+            RefractionLayerConfigLayer(
+                kind='v3_t2',
+                min_offset_m=500.0,
+                max_offset_m=None,
+                velocity_mode='solve_global',
+            ),
+        ),
+    )
+
+    assert config.assignment_policy == 'reject_overlap'
+
+
+@pytest.mark.parametrize('policy', ('reject_overlap', 'exclusive_shallowest', 'independent'))
+def test_refraction_layer_config_normalizes_assignment_policy(policy: str) -> None:
+    if policy == 'reject_overlap':
+        with pytest.raises(ValueError, match='layer_assignment_policy is reject_overlap'):
+            RefractionStaticModelOptions(
+                method='multilayer_time_term',
+                first_layer=RefractionStaticFirstLayerOptions(
+                    weathering_velocity_m_s=500.0
+                ),
+                initial_bedrock_velocity_m_s=1800.0,
+                layer_assignment_policy=policy,
+                layers=(
+                    RefractionStaticLayerOptions(
+                        kind='v2_t1',
+                        min_offset_m=0.0,
+                        max_offset_m=600.0,
+                    ),
+                    RefractionStaticLayerOptions(
+                        kind='v3_t2',
+                        min_offset_m=500.0,
+                        max_offset_m=None,
+                        initial_velocity_m_s=2600.0,
+                    ),
+                ),
+            )
+        return
+
+    model = RefractionStaticModelOptions(
+        method='multilayer_time_term',
+        first_layer=RefractionStaticFirstLayerOptions(weathering_velocity_m_s=500.0),
+        initial_bedrock_velocity_m_s=1800.0,
+        layer_assignment_policy=policy,
+        layers=(
+            RefractionStaticLayerOptions(
+                kind='v2_t1',
+                min_offset_m=0.0,
+                max_offset_m=600.0,
+            ),
+            RefractionStaticLayerOptions(
+                kind='v3_t2',
+                min_offset_m=500.0,
+                max_offset_m=None,
+                initial_velocity_m_s=2600.0,
+            ),
+        ),
+    )
+
+    config = normalize_refraction_layer_config(model)
+
+    assert config.assignment_policy == policy

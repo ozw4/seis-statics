@@ -18,6 +18,7 @@ from seis_statics.validation import (
 from seis_statics.refraction.types import (
     BedrockVelocityMode,
     RefractionFirstLayerMode,
+    RefractionLayerAssignmentPolicy,
     RefractionLayerKind,
     RefractionLayerVelocityMode,
 )
@@ -27,13 +28,14 @@ RefractionStaticMethod = Literal['gli_variable_thickness', 'multilayer_time_term
 RefractionStaticMoveoutModel = Literal['head_wave_linear_offset']
 RefractionStaticDistanceSource = Literal['geometry', 'offset_header', 'auto']
 RefractionStaticLayerKind = RefractionLayerKind
+RefractionStaticLayerAssignmentPolicy = RefractionLayerAssignmentPolicy
 RefractionStaticLayerVelocityMode = RefractionLayerVelocityMode
 RefractionStaticRefractorCellAssignmentMode = Literal['midpoint']
 RefractionStaticRefractorCellOutsideGridPolicy = Literal['reject']
 RefractionStaticRefractorCellCoordinateMode = Literal['grid_3d', 'line_2d_projected']
 RefractionStaticRobustMethod = Literal['mad', 'sigma']
 RefractionStaticDatumMode = Literal['floating_and_flat', 'floating_only', 'flat_only', 'none']
-RefractionStaticFloatingDatumMode = Literal['smoothed_topography', 'constant', 'surface', 'from_artifact']
+RefractionStaticFloatingDatumMode = Literal['smoothed_topography', 'constant', 'surface', 'provided']
 RefractionStaticDatumSmoothingMethod = Literal['moving_average', 'median']
 RefractionStaticConversionMode = Literal['existing', 't1lsst_1layer', 't1lsst_multilayer']
 RefractionStaticReducedTimeQcVelocityMode = Literal['layer_velocity', 'fixed', 'initial_velocity']
@@ -176,7 +178,7 @@ class RefractionStaticModelOptions:
     max_weathering_thickness_m: float | None = None
     refractor_cell: RefractionStaticRefractorCellOptions | None = None
     layers: tuple[RefractionStaticLayerOptions, ...] | None = None
-    allow_overlapping_layer_gates: bool = False
+    layer_assignment_policy: RefractionLayerAssignmentPolicy = 'reject_overlap'
 
     def __post_init__(self) -> None:
         _set(self, 'method', _literal(self.method, {'gli_variable_thickness', 'multilayer_time_term'}, 'model.method'))
@@ -187,7 +189,7 @@ class RefractionStaticModelOptions:
         _set_positive_float(self, 'min_bedrock_velocity_m_s', 'model.min_bedrock_velocity_m_s')
         _set_positive_float(self, 'max_bedrock_velocity_m_s', 'model.max_bedrock_velocity_m_s')
         _set_optional_positive_float(self, 'max_weathering_thickness_m', 'model.max_weathering_thickness_m')
-        _set(self, 'allow_overlapping_layer_gates', _bool(self.allow_overlapping_layer_gates, 'model.allow_overlapping_layer_gates'))
+        _set(self, 'layer_assignment_policy', _literal(self.layer_assignment_policy, {'reject_overlap', 'exclusive_shallowest', 'independent'}, 'model.layer_assignment_policy'))
         if self.layers is not None:
             _set(self, 'layers', tuple(self.layers))
 
@@ -295,7 +297,7 @@ class RefractionStaticModelOptions:
             if layer.max_offset_m is None and _REFRACTION_STATIC_LAYER_ORDER[layer.kind] != deepest_enabled_order:
                 raise ValueError('model.layers.max_offset_m may be null only for the deepest enabled layer')
             self._check_multilayer_velocity_layer(layer, resolved_weathering_velocity=resolved_weathering_velocity)
-        if not self.allow_overlapping_layer_gates:
+        if self.layer_assignment_policy == 'reject_overlap':
             self._check_multilayer_layer_gate_overlap(enabled_layers)
         has_enabled_solve_cell_layer = any(layer.enabled and layer.velocity_mode == 'solve_cell' for layer in layers)
         if has_enabled_solve_cell_layer and self.refractor_cell is None:
@@ -342,7 +344,7 @@ class RefractionStaticModelOptions:
                 other_min = float('-inf') if other.min_offset_m is None else other.min_offset_m
                 other_max = float('inf') if other.max_offset_m is None else other.max_offset_m
                 if max(layer_min, other_min) < min(layer_max, other_max):
-                    raise ValueError('model.layers offset gates must not overlap unless model.allow_overlapping_layer_gates is true')
+                    raise ValueError('model.layers offset gates must not overlap when model.layer_assignment_policy is reject_overlap')
 
     def _layer_initial_velocity_m_s(self, layer: RefractionStaticLayerOptions) -> float | None:
         if layer.initial_velocity_m_s is not None:
@@ -441,7 +443,13 @@ class RefractionStaticSolverOptions:
 
 @dataclass(frozen=True)
 class RefractionStaticDatumOptions:
-    """Datum options for refraction static composition."""
+    """Numerical datum options for refraction static composition.
+
+    Use ``floating_datum_mode='provided'`` when a caller has already resolved
+    floating datum elevations externally. The resolved numeric arrays belong on
+    the datum computation function call, while provenance, job identity, and
+    artifact locators remain consumer-owned.
+    """
 
     mode: RefractionStaticDatumMode = 'none'
     floating_datum_mode: RefractionStaticFloatingDatumMode = 'smoothed_topography'
@@ -450,14 +458,12 @@ class RefractionStaticDatumOptions:
     smoothing_radius_m: float | None = None
     smoothing_window_nodes: int | None = 11
     smoothing_method: RefractionStaticDatumSmoothingMethod = 'moving_average'
-    floating_datum_job_id: str | None = None
-    floating_datum_artifact_name: str | None = None
     allow_flat_datum_above_topography: bool = True
     allow_flat_datum_below_refractor: bool = False
 
     def __post_init__(self) -> None:
         _set(self, 'mode', _literal(self.mode, {'floating_and_flat', 'floating_only', 'flat_only', 'none'}, 'datum.mode'))
-        _set(self, 'floating_datum_mode', _literal(self.floating_datum_mode, {'smoothed_topography', 'constant', 'surface', 'from_artifact'}, 'datum.floating_datum_mode'))
+        _set(self, 'floating_datum_mode', _literal(self.floating_datum_mode, {'smoothed_topography', 'constant', 'surface', 'provided'}, 'datum.floating_datum_mode'))
         _set_optional_finite_float(self, 'flat_datum_elevation_m', 'datum.flat_datum_elevation_m')
         _set_optional_finite_float(self, 'floating_datum_elevation_m', 'datum.floating_datum_elevation_m')
         _set_optional_positive_float(self, 'smoothing_radius_m', 'datum.smoothing_radius_m')
@@ -465,23 +471,12 @@ class RefractionStaticDatumOptions:
         if self.smoothing_window_nodes is not None and self.smoothing_window_nodes % 2 == 0:
             raise ValueError('datum.smoothing_window_nodes must be odd')
         _set(self, 'smoothing_method', _literal(self.smoothing_method, {'moving_average', 'median'}, 'datum.smoothing_method'))
-        if self.floating_datum_artifact_name is not None:
-            _set(self, 'floating_datum_artifact_name', _artifact_basename(self.floating_datum_artifact_name, 'datum.floating_datum_artifact_name'))
         _set(self, 'allow_flat_datum_above_topography', _bool(self.allow_flat_datum_above_topography, 'datum.allow_flat_datum_above_topography'))
         _set(self, 'allow_flat_datum_below_refractor', _bool(self.allow_flat_datum_below_refractor, 'datum.allow_flat_datum_below_refractor'))
         if self.mode in {'flat_only', 'floating_and_flat'} and self.flat_datum_elevation_m is None:
             raise ValueError('datum.flat_datum_elevation_m is required for flat datum modes')
         if self.floating_datum_mode == 'constant' and self.floating_datum_elevation_m is None:
             raise ValueError('datum.floating_datum_elevation_m is required when floating_datum_mode is constant')
-        if self.floating_datum_mode == 'from_artifact':
-            if not self.floating_datum_job_id:
-                raise ValueError('datum.floating_datum_job_id is required when floating_datum_mode is from_artifact')
-            if not self.floating_datum_artifact_name:
-                raise ValueError('datum.floating_datum_artifact_name is required when floating_datum_mode is from_artifact')
-        elif self.floating_datum_job_id is not None:
-            raise ValueError('datum.floating_datum_job_id is only allowed when floating_datum_mode is from_artifact')
-        elif self.floating_datum_artifact_name is not None:
-            raise ValueError('datum.floating_datum_artifact_name is only allowed when floating_datum_mode is from_artifact')
 
 
 @dataclass(frozen=True)
@@ -541,14 +536,6 @@ def _values_close(left: float, right: float) -> bool:
     return bool(np.isclose(float(left), float(right), rtol=1.0e-6, atol=1.0e-6))
 
 
-def _artifact_basename(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f'{name} must be a plain file name')
-    if value in {'', '.', '..'} or '/' in value or '\\' in value:
-        raise ValueError(f'{name} must be a plain file name')
-    return value
-
-
 def _set_finite_float(instance: object, attr: str, name: str) -> None:
     _set(instance, attr, coerce_finite_float(getattr(instance, attr), name=name))
 
@@ -599,6 +586,7 @@ __all__ = [
     'RefractionStaticFirstLayerOptions',
     'RefractionStaticFloatingDatumMode',
     'RefractionStaticLayerKind',
+    'RefractionStaticLayerAssignmentPolicy',
     'RefractionStaticMethod',
     'RefractionStaticModelOptions',
     'RefractionStaticMoveoutModel',

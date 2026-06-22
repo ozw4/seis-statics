@@ -31,6 +31,7 @@ def test_refraction_types_construct_shared_input_model_without_path_containers()
         pick_count=np.array([1, 1]),
     )
     layer_masks = RefractionLayerObservationMasks(
+        assignment_policy='reject_overlap',
         layer_kind=np.array(['v2_t1']),
         layer_enabled=np.array([True]),
         layer_min_offset_m=np.array([0.0]),
@@ -39,6 +40,10 @@ def test_refraction_types_construct_shared_input_model_without_path_containers()
         layer_rejection_reason_sorted={'v2_t1': np.array(['', ''])},
         layer_candidate_count={'v2_t1': n_traces},
         layer_observation_count={'v2_t1': n_traces},
+        overlapping_valid_observation_count=0,
+        unassigned_valid_observation_count=0,
+        unique_used_trace_count=n_traces,
+        layer_membership_total_count=n_traces,
     )
 
     model = RefractionStaticInputModel(

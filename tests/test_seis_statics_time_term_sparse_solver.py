@@ -15,6 +15,10 @@ from seis_statics.time_term import (
     solve_time_term_sparse_least_squares,
     summarize_time_term_sparse_solver_result,
 )
+from seis_statics.time_term.sparse_solver import (
+    _ValidatedTimeTermDesign,
+    _build_trace_prediction_valid_mask,
+)
 
 TRUE_NODE_TIME_TERM_S = np.asarray([0.010, -0.002, 0.006], dtype=np.float64)
 SOURCE_NODE_ID_SORTED = np.asarray([0, 0, 1, 2, 1], dtype=np.int64)
@@ -123,18 +127,17 @@ def test_time_term_solver_system_contains_observation_damping_and_gauge_rows() -
         _design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.5,
-            gauge='reference_node',
+            gauge='auto_component',
             gauge_weight=2.0,
-            reference_node_id=1,
         ),
     )
 
     assert sparse.isspmatrix_csr(system.augmented_matrix)
     assert system.n_observation_rows == 4
     assert system.n_damping_rows == 3
-    assert system.n_gauge_rows == 1
-    assert system.n_augmented_rows == 8
-    assert system.augmented_matrix.shape == (8, 3)
+    assert system.n_gauge_rows == 0
+    assert system.n_augmented_rows == 7
+    assert system.augmented_matrix.shape == (7, 3)
     np.testing.assert_allclose(
         system.augmented_matrix[:4].toarray(),
         OBSERVATION_MATRIX.toarray(),
@@ -185,92 +188,68 @@ def test_time_term_solver_system_uses_array_damping_prior() -> None:
     np.testing.assert_allclose(system.augmented_data_s[4:7], 0.5 * prior)
 
 
-def test_time_term_solver_system_adds_mean_zero_gauge_row() -> None:
+def test_time_term_solver_system_adds_auto_component_signed_gauge_rows() -> None:
     system = build_time_term_solver_system(
-        _design(),
+        _disconnected_design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.0,
-            gauge='mean_zero',
+            gauge='auto_component',
             gauge_weight=2.0,
         ),
     )
 
     assert system.n_damping_rows == 0
-    assert system.n_gauge_rows == 1
+    assert system.n_gauge_rows == 2
     np.testing.assert_allclose(
-        system.augmented_matrix[-1].toarray().ravel(),
-        np.full(3, 2.0 / np.sqrt(3.0), dtype=np.float64),
+        system.augmented_matrix[-2:].toarray(),
+        [
+            [2.0 / np.sqrt(2.0), -2.0 / np.sqrt(2.0), 0.0, 0.0],
+            [0.0, 0.0, 2.0 / np.sqrt(2.0), -2.0 / np.sqrt(2.0)],
+        ],
     )
-    assert system.augmented_data_s[-1] == 0.0
+    np.testing.assert_allclose(system.augmented_data_s[-2:], 0.0)
 
 
-def test_time_term_solver_system_adds_reference_node_gauge_row() -> None:
+def test_time_term_solver_system_skips_auto_component_gauge_for_nonbipartite_graph() -> None:
     system = build_time_term_solver_system(
         _design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.0,
-            gauge='reference_node',
-            gauge_weight=3.0,
-            reference_node_id=2,
+            gauge='auto_component',
         ),
     )
 
-    np.testing.assert_allclose(
-        system.augmented_matrix[-1].toarray().ravel(),
-        [0.0, 0.0, 3.0],
-    )
-    assert system.reference_node_id == 2
+    assert system.n_gauge_rows == 0
+    assert system.n_bipartite_components == 0
 
 
-def test_time_term_solver_system_adds_component_mean_zero_gauge_rows() -> None:
+def test_time_term_solver_system_none_zero_damping_allows_nonbipartite_graph() -> None:
     system = build_time_term_solver_system(
-        _disconnected_design(),
+        _design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.0,
-            gauge='component_mean_zero',
-            gauge_weight=2.0,
+            gauge='none',
         ),
     )
 
-    assert system.n_components == 2
-    np.testing.assert_array_equal(system.component_id_by_node, [0, 0, 1, 1])
-    np.testing.assert_allclose(
-        system.augmented_matrix[-2:].toarray(),
-        [
-            [2.0 / np.sqrt(2.0), 2.0 / np.sqrt(2.0), 0.0, 0.0],
-            [0.0, 0.0, 2.0 / np.sqrt(2.0), 2.0 / np.sqrt(2.0)],
-        ],
-    )
+    assert system.n_gauge_rows == 0
+    assert system.n_bipartite_components == 0
 
 
-@pytest.mark.parametrize('gauge', ['mean_zero', 'reference_node'])
-def test_time_term_solver_system_rejects_disconnected_zero_damping_single_gauge(
-    gauge: str,
-) -> None:
-    with pytest.raises(ValueError, match='disconnected'):
+def test_time_term_solver_system_rejects_none_zero_damping_for_bipartite_graph() -> None:
+    with pytest.raises(ValueError, match='zero damping'):
         build_time_term_solver_system(
             _disconnected_design(),
-            options=TimeTermSparseSolverOptions(damping_lambda=0.0, gauge=gauge),
-        )
-
-
-def test_time_term_solver_system_rejects_zero_damping_without_gauge() -> None:
-    with pytest.raises(ValueError, match='damping_lambda'):
-        build_time_term_solver_system(
-            _design(),
             options=TimeTermSparseSolverOptions(damping_lambda=0.0, gauge='none'),
         )
 
 
-def test_time_term_solver_system_rejects_invalid_reference_node() -> None:
-    with pytest.raises(ValueError, match='reference_node_id'):
+@pytest.mark.parametrize('gauge', ['mean_zero', 'component_mean_zero', 'reference_node'])
+def test_time_term_solver_system_rejects_legacy_gauge_modes(gauge: str) -> None:
+    with pytest.raises(ValueError, match='unsupported gauge'):
         build_time_term_solver_system(
             _design(),
-            options=TimeTermSparseSolverOptions(
-                damping_lambda=0.0,
-                gauge='reference_node',
-                reference_node_id=3,
-            ),
+            options=TimeTermSparseSolverOptions(gauge=gauge),  # type: ignore[arg-type]
         )
 
 
@@ -284,7 +263,7 @@ def test_time_term_solver_system_allows_unobserved_node_when_configured() -> Non
         _unobserved_node_design(),
         options=TimeTermSparseSolverOptions(
             damping_lambda=0.01,
-            gauge='component_mean_zero',
+            gauge='auto_component',
             require_all_nodes_observed=False,
             min_total_observations_per_node=0,
         ),
@@ -346,12 +325,86 @@ def test_time_term_sparse_solver_returns_estimated_trace_delay_in_sorted_order()
         TRUE_NODE_TIME_TERM_S[SOURCE_NODE_ID_SORTED]
         + TRUE_NODE_TIME_TERM_S[RECEIVER_NODE_ID_SORTED]
     )
-    expected[~result.used_trace_mask_sorted] = np.nan
     np.testing.assert_allclose(
         result.estimated_trace_time_term_delay_s_sorted,
         expected,
         atol=1.0e-9,
         equal_nan=True,
+    )
+    np.testing.assert_array_equal(
+        result.prediction_valid_trace_mask_sorted,
+        [True, True, True, True, True],
+    )
+    assert result.used_trace_mask_sorted[4].item() is False
+    assert np.isfinite(result.estimated_trace_time_term_delay_s_sorted[4])
+
+
+def test_time_term_sparse_solver_fit_used_only_prediction_policy_limits_delay() -> None:
+    result = solve_time_term_sparse_least_squares(
+        _design(),
+        options=_accurate_options(trace_prediction_policy='fit_used_only'),
+    )
+    summary = summarize_time_term_sparse_solver_result(result)
+
+    np.testing.assert_array_equal(
+        result.prediction_valid_trace_mask_sorted,
+        result.used_trace_mask_sorted,
+    )
+    assert np.isnan(result.estimated_trace_time_term_delay_s_sorted[4])
+    assert summary['n_prediction_valid_traces'] == 4
+    assert summary['n_fit_unused_prediction_valid_traces'] == 0
+    assert summary['n_unsupported_endpoint_traces'] == 0
+
+
+def test_fit_used_only_prediction_policy_uses_final_fit_mask_exactly() -> None:
+    design = _ValidatedTimeTermDesign(
+        matrix=sparse.csr_matrix((2, 3), dtype=np.float64),
+        data_s=np.zeros(2, dtype=np.float64),
+        n_traces=3,
+        n_observations=2,
+        n_nodes=3,
+        used_trace_mask_sorted=np.asarray([True, True, False]),
+        row_trace_index_sorted=np.asarray([0, 1], dtype=np.int64),
+        row_source_node_id=np.asarray([0, 1], dtype=np.int64),
+        row_receiver_node_id=np.asarray([1, 2], dtype=np.int64),
+        source_node_id_sorted=np.asarray([0, 1, 2], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([1, 2, 0], dtype=np.int64),
+        total_observation_count_by_node=np.asarray([1, 1, 1], dtype=np.int64),
+    )
+
+    fit_used_mask = _build_trace_prediction_valid_mask(
+        design,
+        options=TimeTermSparseSolverOptions(
+            min_total_observations_per_node=2,
+            trace_prediction_policy='fit_used_only',
+        ),
+    )
+    all_supported_mask = _build_trace_prediction_valid_mask(
+        design,
+        options=TimeTermSparseSolverOptions(
+            min_total_observations_per_node=2,
+            trace_prediction_policy='all_supported',
+        ),
+    )
+
+    np.testing.assert_array_equal(fit_used_mask, [True, True, False])
+    np.testing.assert_array_equal(all_supported_mask, [False, False, False])
+
+
+def test_time_term_sparse_solver_unsupported_endpoint_prediction_stays_nan() -> None:
+    result = solve_time_term_sparse_least_squares(
+        _unobserved_node_design(),
+        options=_accurate_options(
+            damping_lambda=0.01,
+            gauge='auto_component',
+            require_all_nodes_observed=False,
+            min_total_observations_per_node=0,
+        ),
+    )
+
+    np.testing.assert_array_equal(
+        result.prediction_valid_trace_mask_sorted,
+        [True, True, True, True, False],
     )
     assert np.isnan(result.estimated_trace_time_term_delay_s_sorted[4])
 
@@ -421,6 +474,11 @@ def test_summarize_time_term_sparse_solver_result_is_json_safe() -> None:
     assert summary['gauge_mode'] == 'none'
     assert summary['solver_name'] == 'lsmr'
     assert summary['n_unobserved_nodes'] == 0
+    assert summary['n_fit_used_traces'] == 4
+    assert summary['n_robust_rejected_traces'] == 0
+    assert summary['n_prediction_valid_traces'] == 5
+    assert summary['n_fit_unused_prediction_valid_traces'] == 1
+    assert summary['n_unsupported_endpoint_traces'] == 0
     assert summary['node_time_term_ms']['count'] == 3
 
 

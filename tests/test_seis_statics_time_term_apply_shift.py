@@ -22,6 +22,7 @@ def test_delay_to_applied_shift_negates_scalar_and_array() -> None:
 def test_compose_time_term_applied_shifts_sums_datum_residual_and_weathering() -> None:
     result = compose_time_term_applied_shifts(
         trace_time_term_delay_s_sorted=np.asarray([0.010, -0.004, 0.0]),
+        prediction_valid_trace_mask_sorted=np.asarray([True, True, True]),
         datum_applied_shift_s_sorted=np.asarray([0.001, 0.002, 0.003]),
         residual_applied_shift_s_sorted=np.asarray([-0.002, 0.004, 0.005]),
     )
@@ -42,6 +43,7 @@ def test_compose_time_term_applied_shifts_sums_datum_residual_and_weathering() -
 def test_invalid_trace_policy_returns_nan_and_no_op_mask() -> None:
     result = compose_time_term_applied_shifts(
         trace_time_term_delay_s_sorted=np.asarray([0.010, 0.020, np.nan, 0.030]),
+        prediction_valid_trace_mask_sorted=np.asarray([True, True, False, True]),
         datum_applied_shift_s_sorted=np.asarray([0.001, 0.002, 0.003, np.nan]),
         residual_applied_shift_s_sorted=np.asarray([0.0, 0.0, 0.0, 0.0]),
         valid_trace_mask_sorted=np.asarray([True, False, True, True]),
@@ -67,7 +69,18 @@ def test_compose_time_term_applied_shifts_rejects_max_shift_violation() -> None:
     with pytest.raises(ValueError, match='max_abs_final_applied_shift_ms'):
         compose_time_term_applied_shifts(
             trace_time_term_delay_s_sorted=np.asarray([0.010]),
+            prediction_valid_trace_mask_sorted=np.asarray([True]),
             datum_applied_shift_s_sorted=np.asarray([0.0]),
             residual_applied_shift_s_sorted=np.asarray([0.0]),
             max_abs_final_applied_shift_ms=5.0,
+        )
+
+
+def test_compose_time_term_applied_shifts_requires_finite_prediction_delay() -> None:
+    with pytest.raises(ValueError, match='prediction-valid traces'):
+        compose_time_term_applied_shifts(
+            trace_time_term_delay_s_sorted=np.asarray([np.nan]),
+            prediction_valid_trace_mask_sorted=np.asarray([True]),
+            datum_applied_shift_s_sorted=np.asarray([0.0]),
+            residual_applied_shift_s_sorted=np.asarray([0.0]),
         )

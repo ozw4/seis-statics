@@ -30,7 +30,12 @@ def build_refraction_layer_observation_masks(
     valid_observation_mask_sorted: object | None = None,
     rejection_reason_sorted: object | None = None,
 ) -> RefractionLayerObservationMasks:
-    """Assign sorted observations to refraction layers by absolute offset gates."""
+    """Assign observations to layers by absolute-offset gates and policy.
+
+    ``exclusive_shallowest`` uses layer order to keep each valid trace in only
+    the first matching gate. ``independent`` lets every matching layer use the
+    trace, so QC reports both unique used traces and total layer memberships.
+    """
     if not isinstance(layer_config, RefractionLayerConfig):
         raise TypeError('layer_config must be RefractionLayerConfig')
     offset = coerce_1d_real_numeric_float64(offset_m_sorted, name='offset_m_sorted')
@@ -45,7 +50,10 @@ def build_refraction_layer_observation_masks(
 
     offset_abs = np.abs(offset)
     finite_offset_mask = np.isfinite(offset_abs)
+    assignment_policy = layer_config.assignment_policy
     assigned_mask = np.zeros(offset.shape, dtype=bool)
+    candidate_membership_count = np.zeros(offset.shape, dtype=np.int32)
+    used_membership_count = np.zeros(offset.shape, dtype=np.int32)
     used_masks: dict[str, np.ndarray] = {}
     rejection_reasons: dict[str, np.ndarray] = {}
     candidate_counts: dict[str, int] = {}
@@ -53,14 +61,22 @@ def build_refraction_layer_observation_masks(
 
     for layer in layer_config.layers:
         candidate_mask = finite_offset_mask & _layer_candidate_mask(layer, offset_abs)
-        used_mask = candidate_mask & valid_observation_mask & ~assigned_mask
-        assigned_mask |= used_mask
+        candidate_membership_count += candidate_mask.astype(np.int32)
+        if assignment_policy == 'exclusive_shallowest':
+            used_mask = candidate_mask & valid_observation_mask & ~assigned_mask
+            already_assigned_mask = candidate_mask & valid_observation_mask & assigned_mask
+            assigned_mask |= used_mask
+        else:
+            used_mask = candidate_mask & valid_observation_mask
+            already_assigned_mask = np.zeros(offset.shape, dtype=bool)
+        used_membership_count += used_mask.astype(np.int32)
 
         kind = layer.kind
         used_masks[kind] = np.ascontiguousarray(used_mask, dtype=bool)
         rejection_reasons[kind] = _layer_rejection_reason(
             candidate_mask=candidate_mask,
             used_mask=used_mask,
+            already_assigned_mask=already_assigned_mask,
             finite_offset_mask=finite_offset_mask,
             valid_observation_mask=valid_observation_mask,
             base_rejection_reason=base_rejection_reason,
@@ -68,7 +84,17 @@ def build_refraction_layer_observation_masks(
         candidate_counts[kind] = int(np.count_nonzero(candidate_mask))
         observation_counts[kind] = int(np.count_nonzero(used_mask))
 
+    overlapping_valid_observation_count = int(
+        np.count_nonzero(valid_observation_mask & (candidate_membership_count > 1))
+    )
+    unassigned_valid_observation_count = int(
+        np.count_nonzero(valid_observation_mask & (used_membership_count == 0))
+    )
+    unique_used_trace_count = int(np.count_nonzero(used_membership_count > 0))
+    layer_membership_total_count = int(np.sum(used_membership_count))
+
     return RefractionLayerObservationMasks(
+        assignment_policy=assignment_policy,
         layer_kind=np.asarray([layer.kind for layer in layer_config.layers], dtype=str),
         layer_enabled=np.ones(len(layer_config.layers), dtype=bool),
         layer_min_offset_m=_layer_bound_array(
@@ -83,13 +109,17 @@ def build_refraction_layer_observation_masks(
         layer_rejection_reason_sorted=rejection_reasons,
         layer_candidate_count=candidate_counts,
         layer_observation_count=observation_counts,
+        overlapping_valid_observation_count=overlapping_valid_observation_count,
+        unassigned_valid_observation_count=unassigned_valid_observation_count,
+        unique_used_trace_count=unique_used_trace_count,
+        layer_membership_total_count=layer_membership_total_count,
     )
 
 
 def refraction_layer_observation_qc(
     layer_masks: RefractionLayerObservationMasks,
 ) -> dict[str, object]:
-    """Return stable QC counts for layer observation masks."""
+    """Return stable QC counts that expose overlap and membership behavior."""
     candidate_count = {
         str(kind): int(layer_masks.layer_candidate_count[str(kind)])
         for kind in layer_masks.layer_kind
@@ -102,10 +132,19 @@ def refraction_layer_observation_qc(
     total_observation_count = sum(observation_count.values())
     return {
         'layer_count': int(len(layer_masks.layer_kind)),
+        'assignment_policy': layer_masks.assignment_policy,
         'layer_candidate_count': candidate_count,
         'layer_observation_count': observation_count,
         'total_layer_candidate_count': int(total_candidate_count),
         'total_layer_observation_count': int(total_observation_count),
+        'overlapping_valid_observation_count': int(
+            layer_masks.overlapping_valid_observation_count
+        ),
+        'unassigned_valid_observation_count': int(
+            layer_masks.unassigned_valid_observation_count
+        ),
+        'unique_used_trace_count': int(layer_masks.unique_used_trace_count),
+        'layer_membership_total_count': int(layer_masks.layer_membership_total_count),
     }
 
 
@@ -146,6 +185,7 @@ def _layer_rejection_reason(
     *,
     candidate_mask: np.ndarray,
     used_mask: np.ndarray,
+    already_assigned_mask: np.ndarray,
     finite_offset_mask: np.ndarray,
     valid_observation_mask: np.ndarray,
     base_rejection_reason: np.ndarray,
@@ -157,8 +197,7 @@ def _layer_rejection_reason(
     reason[invalid_candidate_mask] = _candidate_invalid_reason(
         base_rejection_reason[invalid_candidate_mask],
     )
-    assigned_elsewhere_mask = candidate_mask & valid_observation_mask & ~used_mask
-    reason[assigned_elsewhere_mask] = ALREADY_ASSIGNED_REJECTION_REASON
+    reason[already_assigned_mask] = ALREADY_ASSIGNED_REJECTION_REASON
     reason[used_mask] = OK_REJECTION_REASON
     return np.ascontiguousarray(reason)
 

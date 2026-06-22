@@ -15,6 +15,11 @@ from seis_statics._validation import (
     coerce_positive_finite_float as _coerce_positive_finite_float,
     coerce_positive_int as _coerce_positive_int,
 )
+from seis_statics._endpoint_sum_graph import (
+    EndpointSumGraphSummary,
+    analyze_endpoint_sum_graph,
+    build_endpoint_sum_gauge_matrix,
+)
 from seis_statics.refraction.cell_regularization import (
     CellSlownessSmoothingRows,
     build_cell_slowness_smoothing_rows,
@@ -64,6 +69,12 @@ class RefractionStaticSolveSystem:
     n_gauge_rows: int
     n_augmented_rows: int
     n_parameters: int
+    component_id_by_node: np.ndarray
+    n_node_components: int
+    is_bipartite_by_component: np.ndarray
+    signed_partition_by_node: np.ndarray
+    gauge_required_by_component: np.ndarray
+    n_bipartite_node_components: int
 
     damping: float
     node_lower_bound_s: float
@@ -223,7 +234,12 @@ def build_refraction_static_solver_system(
         damping=options.damping,
         initial_parameter_vector=initial,
     )
-    gauge_matrix = _build_source_receiver_gauge_matrix(design)
+    graph = _analyze_design_endpoint_graph(design)
+    gauge_matrix = build_endpoint_sum_gauge_matrix(
+        graph=graph,
+        n_columns=n_parameters,
+        gauge_weight=1.0,
+    )
     gauge_rhs = np.zeros(gauge_matrix.shape[0], dtype=np.float64)
 
     augmented_matrix = sparse.vstack(
@@ -273,6 +289,14 @@ def build_refraction_static_solver_system(
         n_gauge_rows=int(gauge_matrix.shape[0]),
         n_augmented_rows=n_augmented_rows,
         n_parameters=n_parameters,
+        component_id_by_node=graph.component_id_by_node,
+        n_node_components=graph.n_components,
+        is_bipartite_by_component=graph.is_bipartite_by_component,
+        signed_partition_by_node=graph.signed_partition_by_node,
+        gauge_required_by_component=graph.gauge_required_by_component,
+        n_bipartite_node_components=int(
+            np.count_nonzero(graph.is_bipartite_by_component)
+        ),
         damping=options.damping,
         node_lower_bound_s=0.0,
         node_upper_bound_s=float(node_upper),
@@ -731,56 +755,14 @@ def _build_damping_system(
     return matrix, rhs
 
 
-def _build_source_receiver_gauge_matrix(
+def _analyze_design_endpoint_graph(
     design: RefractionStaticDesignMatrix,
-) -> sparse.csr_matrix:
-    n_parameters = int(design.n_parameters)
-    n_active_nodes = int(design.n_active_nodes)
-    if n_active_nodes <= 0:
-        return sparse.csr_matrix((0, n_parameters), dtype=np.float64)
-
-    source_counts = _node_role_counts(
-        design.row_source_node_id,
-        node_id_to_col=design.node_id_to_col,
-        n_active_nodes=n_active_nodes,
+) -> EndpointSumGraphSummary:
+    return analyze_endpoint_sum_graph(
+        n_nodes=int(design.n_active_nodes),
+        row_source_node_id=design.source_node_col,
+        row_receiver_node_id=design.receiver_node_col,
     )
-    receiver_counts = _node_role_counts(
-        design.row_receiver_node_id,
-        node_id_to_col=design.node_id_to_col,
-        n_active_nodes=n_active_nodes,
-    )
-    source_cols = np.flatnonzero(source_counts > 0).astype(np.int64, copy=False)
-    receiver_cols = np.flatnonzero(receiver_counts > 0).astype(np.int64, copy=False)
-    if source_cols.size == 0 or receiver_cols.size == 0:
-        return sparse.csr_matrix((0, n_parameters), dtype=np.float64)
-
-    coeff = np.zeros(n_parameters, dtype=np.float64)
-    coeff[source_cols] += 1.0 / float(source_cols.size)
-    coeff[receiver_cols] -= 1.0 / float(receiver_cols.size)
-    nonzero = np.flatnonzero(coeff != 0.0).astype(np.int64, copy=False)
-    if nonzero.size == 0:
-        return sparse.csr_matrix((0, n_parameters), dtype=np.float64)
-    matrix = sparse.coo_matrix(
-        (
-            coeff[nonzero],
-            (np.zeros(nonzero.size, dtype=np.int64), nonzero),
-        ),
-        shape=(1, n_parameters),
-        dtype=np.float64,
-    ).tocsr()
-    matrix.sort_indices()
-    return matrix
-
-
-def _node_role_counts(
-    node_ids: np.ndarray,
-    *,
-    node_id_to_col: dict[int, int],
-    n_active_nodes: int,
-) -> np.ndarray:
-    values = _coerce_1d_integer_int64(node_ids, name='node_ids')
-    cols = np.asarray([node_id_to_col[int(value)] for value in values], dtype=np.int64)
-    return np.bincount(cols, minlength=n_active_nodes).astype(np.int64, copy=False)
 
 
 def _run_refraction_static_solver(
@@ -1020,6 +1002,12 @@ def _system_with_observation_row_mask(
         n_gauge_rows=system.n_gauge_rows,
         n_augmented_rows=int(augmented_matrix.shape[0]),
         n_parameters=system.n_parameters,
+        component_id_by_node=system.component_id_by_node,
+        n_node_components=system.n_node_components,
+        is_bipartite_by_component=system.is_bipartite_by_component,
+        signed_partition_by_node=system.signed_partition_by_node,
+        gauge_required_by_component=system.gauge_required_by_component,
+        n_bipartite_node_components=system.n_bipartite_node_components,
         damping=system.damping,
         node_lower_bound_s=system.node_lower_bound_s,
         node_upper_bound_s=system.node_upper_bound_s,
@@ -1166,41 +1154,13 @@ def _source_receiver_graph_component_count(
     if n_nodes <= 0:
         return 0
 
-    parent = np.arange(n_nodes, dtype=np.int64)
-    rank = np.zeros(n_nodes, dtype=np.int8)
-
-    def find(node: int) -> int:
-        root = node
-        while int(parent[root]) != root:
-            root = int(parent[root])
-        while int(parent[node]) != node:
-            next_node = int(parent[node])
-            parent[node] = root
-            node = next_node
-        return root
-
-    def union(left: int, right: int) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root == right_root:
-            return
-        if rank[left_root] < rank[right_root]:
-            parent[left_root] = right_root
-        elif rank[left_root] > rank[right_root]:
-            parent[right_root] = left_root
-        else:
-            parent[right_root] = left_root
-            rank[left_root] += 1
-
     row_indices = np.flatnonzero(mask)
-    for source_col, receiver_col in zip(
-        design.source_node_col[row_indices],
-        design.receiver_node_col[row_indices],
-        strict=True,
-    ):
-        union(int(source_col), int(receiver_col))
-
-    return len({find(node) for node in range(n_nodes)})
+    graph = analyze_endpoint_sum_graph(
+        n_nodes=n_nodes,
+        row_source_node_id=design.source_node_col[row_indices],
+        row_receiver_node_id=design.receiver_node_col[row_indices],
+    )
+    return int(graph.n_components)
 
 
 def _robust_center_scale(
@@ -1664,6 +1624,11 @@ def _build_solver_qc(
         'n_smoothing_rows': int(system.n_smoothing_rows),
         'n_damping_rows': int(system.n_damping_rows),
         'n_gauge_rows': int(system.n_gauge_rows),
+        'n_node_components': int(system.n_node_components),
+        'n_bipartite_node_components': int(system.n_bipartite_node_components),
+        'n_gauge_required_node_components': int(
+            np.count_nonzero(system.gauge_required_by_component)
+        ),
         'damping': float(system.damping),
         'node_lower_bound_s': float(system.node_lower_bound_s),
         'node_upper_bound_s': float(system.node_upper_bound_s),

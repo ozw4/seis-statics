@@ -8,6 +8,7 @@ from seis_statics.refraction import (
     RefractionStaticRobustOptions,
     RefractionStaticSolverError,
     RefractionStaticSolverOptions,
+    build_refraction_static_solver_system,
     build_refraction_static_design_matrix_from_arrays,
     solve_refraction_static_design_least_squares,
 )
@@ -111,7 +112,48 @@ def test_refraction_solver_solve_global_matches_known_parameters_and_residual() 
     )
     assert set(result.node_solution_status.tolist()) == {'solved'}
     assert result.system.n_gauge_rows == 1
+    assert result.system.n_node_components == 1
+    assert result.system.n_bipartite_node_components == 1
+    assert result.qc['n_node_components'] == 1
+    assert result.qc['n_bipartite_node_components'] == 1
+    assert result.qc['n_gauge_required_node_components'] == 1
     assert result.qc['solver_name'] == 'lsq_linear'
+
+
+def test_refraction_solver_system_gauge_adds_row_per_bipartite_component() -> None:
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=np.asarray([0.30, 0.40], dtype=np.float64),
+        valid_observation_mask_sorted=np.asarray([True, True]),
+        source_node_id_sorted=np.asarray([10, 20], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([11, 21], dtype=np.int64),
+        distance_m_sorted=np.asarray([500.0, 500.0], dtype=np.float64),
+        node_id=np.asarray([10, 11, 20, 21], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=2,
+    )
+
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(),
+    )
+    node_block = system.augmented_matrix[
+        : system.n_observation_rows + system.n_gauge_rows,
+        : design.n_active_nodes,
+    ].toarray()
+
+    assert system.n_node_components == 2
+    assert system.n_bipartite_node_components == 2
+    assert system.n_gauge_rows == 2
+    np.testing.assert_allclose(
+        system.augmented_matrix[-2:, : design.n_active_nodes].toarray(),
+        [
+            [1.0 / np.sqrt(2.0), -1.0 / np.sqrt(2.0), 0.0, 0.0],
+            [0.0, 0.0, 1.0 / np.sqrt(2.0), -1.0 / np.sqrt(2.0)],
+        ],
+    )
+    assert np.linalg.matrix_rank(node_block) == design.n_active_nodes
 
 
 def test_refraction_solver_fixed_global_uses_fixed_velocity_distance_term() -> None:

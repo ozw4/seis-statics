@@ -97,6 +97,7 @@ def test_refraction_layer_observations_use_half_open_contact_gates() -> None:
 
     assert refraction_layer_observation_qc(masks) == {
         'layer_count': 3,
+        'assignment_policy': 'reject_overlap',
         'layer_candidate_count': {
             'v2_t1': 2,
             'v3_t2': 3,
@@ -109,6 +110,10 @@ def test_refraction_layer_observations_use_half_open_contact_gates() -> None:
         },
         'total_layer_candidate_count': 7,
         'total_layer_observation_count': 5,
+        'overlapping_valid_observation_count': 0,
+        'unassigned_valid_observation_count': 1,
+        'unique_used_trace_count': 5,
+        'layer_membership_total_count': 5,
     }
 
 
@@ -128,7 +133,7 @@ def test_refraction_layer_observations_keep_used_masks_exclusive_with_overlap() 
                 velocity_mode='solve_global',
             ),
         ),
-        allow_overlapping_layer_gates=True,
+        assignment_policy='exclusive_shallowest',
     )
 
     masks = build_refraction_layer_observation_masks(
@@ -138,11 +143,164 @@ def test_refraction_layer_observations_keep_used_masks_exclusive_with_overlap() 
 
     assert masks.layer_candidate_count == {'v2_t1': 1, 'v3_t2': 1}
     assert masks.layer_observation_count == {'v2_t1': 1, 'v3_t2': 0}
+    assert masks.overlapping_valid_observation_count == 1
+    assert masks.unique_used_trace_count == 1
+    assert masks.layer_membership_total_count == 1
     np.testing.assert_array_equal(masks.layer_used_mask_sorted['v2_t1'], np.asarray([True]))
     np.testing.assert_array_equal(masks.layer_used_mask_sorted['v3_t2'], np.asarray([False]))
     assert masks.layer_rejection_reason_sorted['v3_t2'][0] == (
         ALREADY_ASSIGNED_REJECTION_REASON
     )
+
+
+def test_refraction_layer_observations_use_independent_masks_with_overlap() -> None:
+    config = RefractionLayerConfig(
+        layers=(
+            RefractionLayerConfigLayer(
+                kind='v2_t1',
+                min_offset_m=0.0,
+                max_offset_m=150.0,
+                velocity_mode='solve_global',
+            ),
+            RefractionLayerConfigLayer(
+                kind='v3_t2',
+                min_offset_m=100.0,
+                max_offset_m=None,
+                velocity_mode='solve_global',
+            ),
+        ),
+        assignment_policy='independent',
+    )
+
+    masks = build_refraction_layer_observation_masks(
+        layer_config=config,
+        offset_m_sorted=np.asarray([125.0]),
+    )
+
+    assert masks.layer_candidate_count == {'v2_t1': 1, 'v3_t2': 1}
+    assert masks.layer_observation_count == {'v2_t1': 1, 'v3_t2': 1}
+    assert masks.overlapping_valid_observation_count == 1
+    assert masks.unique_used_trace_count == 1
+    assert masks.layer_membership_total_count == 2
+    np.testing.assert_array_equal(masks.layer_used_mask_sorted['v2_t1'], np.asarray([True]))
+    np.testing.assert_array_equal(masks.layer_used_mask_sorted['v3_t2'], np.asarray([True]))
+    assert masks.layer_rejection_reason_sorted['v3_t2'][0] == ''
+
+
+def test_refraction_layer_observations_match_for_non_overlapping_gates() -> None:
+    offsets = np.asarray([-50.0, -100.0, 100.0, 150.0, 200.0])
+    masks_by_policy = {}
+    for policy in ('reject_overlap', 'exclusive_shallowest', 'independent'):
+        config = RefractionLayerConfig(
+            layers=(
+                RefractionLayerConfigLayer(
+                    kind='v2_t1',
+                    min_offset_m=0.0,
+                    max_offset_m=100.0,
+                    velocity_mode='solve_global',
+                ),
+                RefractionLayerConfigLayer(
+                    kind='v3_t2',
+                    min_offset_m=100.0,
+                    max_offset_m=200.0,
+                    velocity_mode='solve_global',
+                ),
+                RefractionLayerConfigLayer(
+                    kind='vsub_t3',
+                    min_offset_m=200.0,
+                    max_offset_m=None,
+                    velocity_mode='solve_global',
+                ),
+            ),
+            assignment_policy=policy,
+        )
+        masks_by_policy[policy] = build_refraction_layer_observation_masks(
+            layer_config=config,
+            offset_m_sorted=offsets,
+        )
+
+    for layer_kind in ('v2_t1', 'v3_t2', 'vsub_t3'):
+        np.testing.assert_array_equal(
+            masks_by_policy['exclusive_shallowest'].layer_used_mask_sorted[layer_kind],
+            masks_by_policy['reject_overlap'].layer_used_mask_sorted[layer_kind],
+        )
+        np.testing.assert_array_equal(
+            masks_by_policy['independent'].layer_used_mask_sorted[layer_kind],
+            masks_by_policy['reject_overlap'].layer_used_mask_sorted[layer_kind],
+        )
+
+
+def test_refraction_layer_observations_assign_trace_to_all_matching_layers() -> None:
+    config = RefractionLayerConfig(
+        layers=(
+            RefractionLayerConfigLayer(
+                kind='v2_t1',
+                min_offset_m=0.0,
+                max_offset_m=150.0,
+                velocity_mode='solve_global',
+            ),
+            RefractionLayerConfigLayer(
+                kind='v3_t2',
+                min_offset_m=50.0,
+                max_offset_m=200.0,
+                velocity_mode='solve_global',
+            ),
+            RefractionLayerConfigLayer(
+                kind='vsub_t3',
+                min_offset_m=25.0,
+                max_offset_m=None,
+                velocity_mode='solve_global',
+            ),
+        ),
+        assignment_policy='independent',
+    )
+
+    masks = build_refraction_layer_observation_masks(
+        layer_config=config,
+        offset_m_sorted=np.asarray([75.0]),
+    )
+
+    assert masks.layer_observation_count == {
+        'v2_t1': 1,
+        'v3_t2': 1,
+        'vsub_t3': 1,
+    }
+    assert masks.overlapping_valid_observation_count == 1
+    assert masks.unique_used_trace_count == 1
+    assert masks.layer_membership_total_count == 3
+
+
+def test_refraction_layer_observations_do_not_count_invalid_overlap_as_valid() -> None:
+    config = RefractionLayerConfig(
+        layers=(
+            RefractionLayerConfigLayer(
+                kind='v2_t1',
+                min_offset_m=0.0,
+                max_offset_m=150.0,
+                velocity_mode='solve_global',
+            ),
+            RefractionLayerConfigLayer(
+                kind='v3_t2',
+                min_offset_m=100.0,
+                max_offset_m=None,
+                velocity_mode='solve_global',
+            ),
+        ),
+        assignment_policy='independent',
+    )
+
+    masks = build_refraction_layer_observation_masks(
+        layer_config=config,
+        offset_m_sorted=np.asarray([125.0]),
+        valid_observation_mask_sorted=np.asarray([False]),
+        rejection_reason_sorted=np.asarray(['bad_pick']),
+    )
+
+    assert masks.overlapping_valid_observation_count == 0
+    assert masks.unique_used_trace_count == 0
+    assert masks.layer_membership_total_count == 0
+    assert masks.layer_rejection_reason_sorted['v2_t1'][0] == 'bad_pick'
+    assert masks.layer_rejection_reason_sorted['v3_t2'][0] == 'bad_pick'
 
 
 def test_refraction_layer_observations_default_invalid_reason_is_not_truncated() -> None:

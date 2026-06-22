@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,7 @@ from seis_statics.time_term import (
     compose_time_term_applied_shifts,
     solve_time_term_robust_least_squares,
     solve_time_term_sparse_least_squares,
+    summarize_time_term_robust_solver_result,
 )
 
 
@@ -91,7 +93,7 @@ def _matrix(
 def _options(**overrides: Any) -> TimeTermSparseSolverOptions:
     payload: dict[str, Any] = {
         'damping_lambda': 0.0,
-        'gauge': 'mean_zero',
+        'gauge': 'auto_component',
         'solver': 'lsmr',
         'atol': 1.0e-12,
         'btol': 1.0e-12,
@@ -184,7 +186,7 @@ def test_zero_scale_stop_reason_reported_for_perfectly_fitted_data() -> None:
     assert result.iteration_summaries[0].residual_scale_s <= 1.0e-12
 
 
-def test_rejected_trace_keeps_nan_applied_shift_policy() -> None:
+def test_rejected_trace_keeps_supported_prediction_after_fit_rejection() -> None:
     result = solve_time_term_robust_least_squares(
         _grid_design(outlier_index=13, outlier_s=0.04),
         sparse_solver_options=_options(),
@@ -192,13 +194,51 @@ def test_rejected_trace_keeps_nan_applied_shift_policy() -> None:
     )
 
     delay = result.final_solver_result.estimated_trace_time_term_delay_s_sorted
+    prediction_mask = result.final_solver_result.prediction_valid_trace_mask_sorted
     shifts = compose_time_term_applied_shifts(
         trace_time_term_delay_s_sorted=delay,
+        prediction_valid_trace_mask_sorted=prediction_mask,
         datum_applied_shift_s_sorted=np.zeros(delay.shape[0], dtype=np.float64),
         residual_applied_shift_s_sorted=np.zeros(delay.shape[0], dtype=np.float64),
     )
 
-    assert np.isnan(delay[13])
+    assert result.rejected_trace_mask_sorted[13].item() is True
+    assert prediction_mask[13].item() is True
+    assert np.isfinite(delay[13])
     assert np.all(np.isfinite(delay[result.final_used_trace_mask_sorted]))
-    assert shifts.valid_shift_mask_sorted[13].item() is False
-    assert np.isnan(shifts.final_applied_shift_s_sorted[13])
+    assert shifts.valid_shift_mask_sorted[13].item() is True
+    assert np.isfinite(shifts.final_applied_shift_s_sorted[13])
+    assert result.n_prediction_valid_traces == delay.shape[0]
+    assert result.n_fit_unused_prediction_valid_traces == 1
+    assert result.n_unsupported_endpoint_traces == 0
+
+    summary = summarize_time_term_robust_solver_result(result)
+    json.dumps(summary, allow_nan=False)
+    assert summary['n_fit_used_traces'] == delay.shape[0] - 1
+    assert summary['n_robust_rejected_traces'] == 1
+    assert summary['n_prediction_valid_traces'] == delay.shape[0]
+    assert summary['n_fit_unused_prediction_valid_traces'] == 1
+    assert summary['n_unsupported_endpoint_traces'] == 0
+
+
+def test_rejected_trace_fit_used_only_prediction_policy_keeps_nan_delay() -> None:
+    result = solve_time_term_robust_least_squares(
+        _grid_design(outlier_index=13, outlier_s=0.04),
+        sparse_solver_options=_options(trace_prediction_policy='fit_used_only'),
+        robust_options=TimeTermRobustOptions(method='mad', threshold=3.0),
+    )
+
+    delay = result.final_solver_result.estimated_trace_time_term_delay_s_sorted
+    prediction_mask = result.final_solver_result.prediction_valid_trace_mask_sorted
+
+    assert result.rejected_trace_mask_sorted[13].item() is True
+    assert prediction_mask[13].item() is False
+    assert np.isnan(delay[13])
+    assert result.n_prediction_valid_traces == delay.shape[0] - 1
+    assert result.n_fit_unused_prediction_valid_traces == 0
+    assert result.n_unsupported_endpoint_traces == 0
+
+    summary = summarize_time_term_robust_solver_result(result)
+    assert summary['n_prediction_valid_traces'] == delay.shape[0] - 1
+    assert summary['n_fit_unused_prediction_valid_traces'] == 0
+    assert summary['n_unsupported_endpoint_traces'] == 0

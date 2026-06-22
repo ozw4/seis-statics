@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
@@ -17,6 +17,7 @@ from seis_statics.time_term.sparse_solver import (
     TimeTermSparseSolverOptions,
     TimeTermSparseSolverResult,
     solve_time_term_sparse_least_squares,
+    summarize_time_term_sparse_solver_result,
 )
 
 TimeTermRobustMethod = Literal['mad', 'sigma']
@@ -77,6 +78,9 @@ class TimeTermRobustSolveResult:
     n_initial_used_traces: int
     n_final_used_traces: int
     n_rejected_total: int
+    n_prediction_valid_traces: int
+    n_fit_unused_prediction_valid_traces: int
+    n_unsupported_endpoint_traces: int
 
 
 def validate_time_term_robust_options(
@@ -323,6 +327,29 @@ def solve_time_term_robust_least_squares(
     )
 
 
+def summarize_time_term_robust_solver_result(
+    result: TimeTermRobustSolveResult,
+) -> dict[str, object]:
+    """Return a JSON-safe robust solve summary with fit and prediction counts."""
+    summary = summarize_time_term_sparse_solver_result(result.final_solver_result)
+    summary.update(
+        {
+            'robust_enabled': bool(result.robust_options.enabled),
+            'robust_method': result.robust_options.method,
+            'robust_stop_reason': result.stop_reason,
+            'n_initial_fit_used_traces': int(result.n_initial_used_traces),
+            'n_fit_used_traces': int(result.n_final_used_traces),
+            'n_robust_rejected_traces': int(result.n_rejected_total),
+            'n_prediction_valid_traces': int(result.n_prediction_valid_traces),
+            'n_fit_unused_prediction_valid_traces': int(
+                result.n_fit_unused_prediction_valid_traces
+            ),
+            'n_unsupported_endpoint_traces': int(result.n_unsupported_endpoint_traces),
+        }
+    )
+    return summary
+
+
 def _build_robust_result(
     *,
     initial_solver_result: TimeTermSparseSolverResult,
@@ -338,14 +365,18 @@ def _build_robust_result(
         final_solver_result.used_trace_mask_sorted,
         dtype=bool,
     )
-    masked_final_solver_result = _mask_unused_trace_delays(
-        final_solver_result,
-        used_trace_mask=final_used_mask,
+    prediction_mask = np.ascontiguousarray(
+        final_solver_result.prediction_valid_trace_mask_sorted,
+        dtype=bool,
+    )
+    endpoint_supported_mask = np.ascontiguousarray(
+        final_solver_result.system.endpoint_supported_trace_mask_sorted,
+        dtype=bool,
     )
     rejected_mask = np.ascontiguousarray(initial_used_mask & ~final_used_mask, dtype=bool)
     return TimeTermRobustSolveResult(
         initial_solver_result=initial_solver_result,
-        final_solver_result=masked_final_solver_result,
+        final_solver_result=final_solver_result,
         robust_options=robust_options,
         sparse_solver_options=sparse_solver_options,
         initial_used_trace_mask_sorted=np.ascontiguousarray(
@@ -363,28 +394,11 @@ def _build_robust_result(
         n_initial_used_traces=int(np.count_nonzero(initial_used_mask)),
         n_final_used_traces=int(np.count_nonzero(final_used_mask)),
         n_rejected_total=int(np.count_nonzero(rejected_mask)),
-    )
-
-
-def _mask_unused_trace_delays(
-    solver_result: TimeTermSparseSolverResult,
-    *,
-    used_trace_mask: np.ndarray,
-) -> TimeTermSparseSolverResult:
-    if np.all(used_trace_mask):
-        return solver_result
-    estimated_delay = _coerce_1d_real_numeric_float64(
-        solver_result.estimated_trace_time_term_delay_s_sorted,
-        name='estimated_trace_time_term_delay_s_sorted',
-        expected_shape=used_trace_mask.shape,
-    ).copy()
-    estimated_delay[~used_trace_mask] = np.nan
-    return replace(
-        solver_result,
-        estimated_trace_time_term_delay_s_sorted=np.ascontiguousarray(
-            estimated_delay,
-            dtype=np.float64,
+        n_prediction_valid_traces=int(np.count_nonzero(prediction_mask)),
+        n_fit_unused_prediction_valid_traces=int(
+            np.count_nonzero(~final_used_mask & prediction_mask)
         ),
+        n_unsupported_endpoint_traces=int(np.count_nonzero(~endpoint_supported_mask)),
     )
 
 
@@ -566,5 +580,6 @@ __all__ = [
     'build_time_term_outlier_mask',
     'compute_time_term_robust_center_scale',
     'solve_time_term_robust_least_squares',
+    'summarize_time_term_robust_solver_result',
     'validate_time_term_robust_options',
 ]

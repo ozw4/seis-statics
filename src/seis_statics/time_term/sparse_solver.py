@@ -21,6 +21,11 @@ from seis_statics._validation import (
     coerce_positive_int as _coerce_positive_int,
     is_real_numeric_dtype as _is_real_numeric_dtype,
 )
+from seis_statics._endpoint_sum_graph import (
+    EndpointSumGraphSummary,
+    analyze_endpoint_sum_graph,
+    build_endpoint_sum_gauge_matrix,
+)
 from seis_statics.time_term.design_matrix import TimeTermDesignMatrix
 
 _coerce_1d_integer_int64 = partial(
@@ -29,22 +34,22 @@ _coerce_1d_integer_int64 = partial(
 )
 
 TimeTermGaugeMode = Literal[
+    'auto_component',
     'none',
-    'mean_zero',
-    'component_mean_zero',
-    'reference_node',
 ]
 TimeTermSparseSolverName = Literal['lsmr', 'lsqr']
+TimeTermTracePredictionPolicy = Literal['all_supported', 'fit_used_only']
 
 
 @dataclass(frozen=True)
 class TimeTermSparseSolverOptions:
+    """Options for fitting node terms and selecting trace prediction coverage."""
+
     damping_lambda: float = 0.01
     damping_prior_s: float | np.ndarray = 0.0
 
-    gauge: TimeTermGaugeMode = 'mean_zero'
+    gauge: TimeTermGaugeMode = 'auto_component'
     gauge_weight: float = 1.0
-    reference_node_id: int | None = None
 
     solver: TimeTermSparseSolverName = 'lsmr'
     atol: float = 1.0e-8
@@ -55,6 +60,7 @@ class TimeTermSparseSolverOptions:
     min_observations: int = 1
     min_total_observations_per_node: int = 1
     require_all_nodes_observed: bool = True
+    trace_prediction_policy: TimeTermTracePredictionPolicy = 'all_supported'
 
     max_abs_node_time_term_ms: float | None = 500.0
     max_abs_estimated_trace_delay_ms: float | None = 500.0
@@ -75,16 +81,30 @@ class TimeTermSolverSystem:
     gauge_mode: TimeTermGaugeMode
     component_id_by_node: np.ndarray
     n_components: int
+    is_bipartite_by_component: np.ndarray
+    signed_partition_by_node: np.ndarray
+    gauge_required_by_component: np.ndarray
+    n_bipartite_components: int
 
     damping_lambda: float
     gauge_weight: float
-    reference_node_id: int | None
     min_total_observations_per_node: int
     total_observation_count_by_node: np.ndarray
+    endpoint_supported_trace_mask_sorted: np.ndarray
 
 
 @dataclass(frozen=True)
 class TimeTermSparseSolverResult:
+    """Sparse solve result.
+
+    ``used_trace_mask_sorted`` is fit eligibility for this solve. It does not
+    define where the final node model may be applied.
+    ``prediction_valid_trace_mask_sorted`` marks traces eligible for final
+    model application under the selected trace prediction policy. The
+    ``all_supported`` policy uses endpoint support from final used
+    observations; ``fit_used_only`` uses the final fit mask exactly.
+    """
+
     node_time_term_s: np.ndarray
     estimated_trace_time_term_delay_s_sorted: np.ndarray
     row_estimated_time_term_delay_s: np.ndarray
@@ -96,6 +116,7 @@ class TimeTermSparseSolverResult:
     rms_residual_after_s: float
 
     used_trace_mask_sorted: np.ndarray
+    prediction_valid_trace_mask_sorted: np.ndarray
     row_trace_index_sorted: np.ndarray
 
     solver_name: TimeTermSparseSolverName
@@ -184,26 +205,29 @@ def solve_time_term_sparse_least_squares(
         name='row_estimated_time_term_delay_s',
     )
 
-    used_trace_mask = validated_design.used_trace_mask_sorted
+    prediction_valid_mask = _build_trace_prediction_valid_mask(
+        validated_design,
+        options=validated_options,
+    )
     estimated_trace_delay = np.full(
         validated_design.n_traces,
         np.nan,
         dtype=np.float64,
     )
-    estimated_trace_delay[used_trace_mask] = (
-        node_time_term[validated_design.source_node_id_sorted[used_trace_mask]]
-        + node_time_term[validated_design.receiver_node_id_sorted[used_trace_mask]]
+    estimated_trace_delay[prediction_valid_mask] = (
+        node_time_term[validated_design.source_node_id_sorted[prediction_valid_mask]]
+        + node_time_term[validated_design.receiver_node_id_sorted[prediction_valid_mask]]
     )
     if estimated_trace_delay.shape != (validated_design.n_traces,):
         raise ValueError('estimated_trace_time_term_delay_s_sorted shape mismatch')
     _validate_all_finite(
-        estimated_trace_delay[used_trace_mask],
-        name='estimated_trace_time_term_delay_s_sorted used traces',
+        estimated_trace_delay[prediction_valid_mask],
+        name='estimated_trace_time_term_delay_s_sorted prediction-valid traces',
     )
     _validate_max_abs_ms(
-        estimated_trace_delay[used_trace_mask],
+        estimated_trace_delay[prediction_valid_mask],
         max_abs_ms=validated_options.max_abs_estimated_trace_delay_ms,
-        name='estimated_trace_time_term_delay_s_sorted used traces',
+        name='estimated_trace_time_term_delay_s_sorted prediction-valid traces',
         limit_name='max_abs_estimated_trace_delay_ms',
     )
 
@@ -228,6 +252,10 @@ def solve_time_term_sparse_least_squares(
         rms_residual_after_s=_rms(residual_after),
         used_trace_mask_sorted=np.ascontiguousarray(
             validated_design.used_trace_mask_sorted,
+            dtype=bool,
+        ),
+        prediction_valid_trace_mask_sorted=np.ascontiguousarray(
+            prediction_valid_mask,
             dtype=bool,
         ),
         row_trace_index_sorted=np.ascontiguousarray(
@@ -258,6 +286,20 @@ def summarize_time_term_sparse_solver_result(
     min_count = _coerce_nonnegative_int(
         system.min_total_observations_per_node,
         name='min_total_observations_per_node',
+    )
+    used_mask = _coerce_1d_bool_array(
+        result.used_trace_mask_sorted,
+        name='used_trace_mask_sorted',
+    )
+    prediction_mask = _coerce_1d_bool_array(
+        result.prediction_valid_trace_mask_sorted,
+        name='prediction_valid_trace_mask_sorted',
+        expected_shape=used_mask.shape,
+    )
+    endpoint_supported_mask = _coerce_1d_bool_array(
+        system.endpoint_supported_trace_mask_sorted,
+        name='endpoint_supported_trace_mask_sorted',
+        expected_shape=used_mask.shape,
     )
 
     return {
@@ -304,6 +346,19 @@ def summarize_time_term_sparse_solver_result(
             )
         ),
         'n_components': int(system.n_components),
+        'n_bipartite_components': int(system.n_bipartite_components),
+        'n_gauge_required_components': int(
+            np.count_nonzero(system.gauge_required_by_component)
+        ),
+        'n_fit_used_traces': int(np.count_nonzero(used_mask)),
+        'n_robust_rejected_traces': 0,
+        'n_prediction_valid_traces': int(np.count_nonzero(prediction_mask)),
+        'n_fit_unused_prediction_valid_traces': int(
+            np.count_nonzero(~used_mask & prediction_mask)
+        ),
+        'n_unsupported_endpoint_traces': int(
+            np.count_nonzero(~endpoint_supported_mask)
+        ),
         'n_unobserved_nodes': int(np.count_nonzero(total_count == 0)),
         'n_nodes_below_min_observations': int(np.count_nonzero(total_count < min_count)),
     }
@@ -315,135 +370,32 @@ def build_node_components(
     row_receiver_node_id: np.ndarray,
 ) -> np.ndarray:
     """Build deterministic connected-component ids from used source/receiver edges."""
-    node_count = _coerce_positive_int(n_nodes, name='n_nodes')
-    source = _coerce_1d_integer_int64(row_source_node_id, name='row_source_node_id')
-    receiver = _coerce_1d_integer_int64(
-        row_receiver_node_id,
-        name='row_receiver_node_id',
+    graph = analyze_endpoint_sum_graph(
+        n_nodes=n_nodes,
+        row_source_node_id=row_source_node_id,
+        row_receiver_node_id=row_receiver_node_id,
     )
-    if source.shape != receiver.shape:
-        raise ValueError('row_source_node_id and row_receiver_node_id must match')
-    _validate_index_range(source, n_unique=node_count, name='row_source_node_id')
-    _validate_index_range(receiver, n_unique=node_count, name='row_receiver_node_id')
-
-    parent = np.arange(node_count, dtype=np.int64)
-    rank = np.zeros(node_count, dtype=np.int8)
-
-    def find(node: int) -> int:
-        root = node
-        while int(parent[root]) != root:
-            root = int(parent[root])
-        while int(parent[node]) != node:
-            next_node = int(parent[node])
-            parent[node] = root
-            node = next_node
-        return root
-
-    def union(left: int, right: int) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root == right_root:
-            return
-        if rank[left_root] < rank[right_root]:
-            parent[left_root] = right_root
-        elif rank[left_root] > rank[right_root]:
-            parent[right_root] = left_root
-        else:
-            parent[right_root] = left_root
-            rank[left_root] += 1
-
-    for source_node, receiver_node in zip(source, receiver, strict=True):
-        union(int(source_node), int(receiver_node))
-
-    component_by_root: dict[int, int] = {}
-    component_id = np.empty(node_count, dtype=np.int64)
-    for node in range(node_count):
-        root = find(node)
-        component = component_by_root.setdefault(root, len(component_by_root))
-        component_id[node] = component
-    return np.ascontiguousarray(component_id, dtype=np.int64)
+    return graph.component_id_by_node
 
 
-def build_gauge_matrix(
+def _build_gauge_matrix(
     *,
-    n_nodes: int,
-    component_id_by_node: np.ndarray,
+    graph: EndpointSumGraphSummary,
     gauge: TimeTermGaugeMode,
     gauge_weight: float,
-    reference_node_id: int | None,
 ) -> sparse.csr_matrix:
-    """Build gauge rows for a node time-term sparse system."""
-    node_count = _coerce_positive_int(n_nodes, name='n_nodes')
-    mode = _validate_gauge_mode(gauge)
-    component_id = _validate_component_id_by_node(
-        component_id_by_node,
-        n_nodes=node_count,
-    )
-    weight = _coerce_finite_float(gauge_weight, name='gauge_weight')
-    if mode != 'none' and weight <= 0.0:
-        raise ValueError('gauge_weight must be greater than 0 when gauge is not none')
-
-    if mode == 'none':
-        return sparse.csr_matrix((0, node_count), dtype=np.float64)
-
-    if mode == 'mean_zero':
-        data = np.full(node_count, weight / np.sqrt(node_count), dtype=np.float64)
-        rows = np.zeros(node_count, dtype=np.int64)
-        cols = np.arange(node_count, dtype=np.int64)
-        matrix = sparse.coo_matrix(
-            (data, (rows, cols)),
-            shape=(1, node_count),
+    if gauge == 'none':
+        return sparse.csr_matrix(
+            (0, int(graph.component_id_by_node.shape[0])),
             dtype=np.float64,
-        ).tocsr()
-        matrix.sort_indices()
-        return matrix
-
-    if mode == 'component_mean_zero':
-        n_components = _component_count(component_id)
-        row_parts: list[np.ndarray] = []
-        col_parts: list[np.ndarray] = []
-        data_parts: list[np.ndarray] = []
-        for component in range(n_components):
-            nodes = np.flatnonzero(component_id == component).astype(
-                np.int64,
-                copy=False,
-            )
-            if nodes.size == 0:
-                raise ValueError('component_id_by_node must be contiguous')
-            row_parts.append(np.full(nodes.shape, component, dtype=np.int64))
-            col_parts.append(np.ascontiguousarray(nodes, dtype=np.int64))
-            data_parts.append(
-                np.full(
-                    nodes.shape,
-                    weight / np.sqrt(int(nodes.size)),
-                    dtype=np.float64,
-                )
-            )
-        matrix = sparse.coo_matrix(
-            (
-                np.concatenate(data_parts),
-                (np.concatenate(row_parts), np.concatenate(col_parts)),
-            ),
-            shape=(n_components, node_count),
-            dtype=np.float64,
-        ).tocsr()
-        matrix.sort_indices()
-        return matrix
-
-    reference_node = _resolve_reference_node_id(
-        reference_node_id,
-        n_nodes=node_count,
+        )
+    if gauge != 'auto_component':
+        raise ValueError(f'unsupported gauge: {gauge!r}')
+    return build_endpoint_sum_gauge_matrix(
+        graph=graph,
+        n_columns=int(graph.component_id_by_node.shape[0]),
+        gauge_weight=gauge_weight,
     )
-    matrix = sparse.coo_matrix(
-        (
-            np.asarray([weight], dtype=np.float64),
-            (np.asarray([0], dtype=np.int64), np.asarray([reference_node], dtype=np.int64)),
-        ),
-        shape=(1, node_count),
-        dtype=np.float64,
-    ).tocsr()
-    matrix.sort_indices()
-    return matrix
 
 
 def _build_time_term_solver_system(
@@ -461,24 +413,18 @@ def _build_time_term_solver_system(
         validated_options.damping_prior_s,
         n_nodes=validated_design.n_nodes,
     )
-    reference_node_id = _resolve_options_reference_node_id(
-        validated_options.reference_node_id,
-        gauge=validated_options.gauge,
-        n_nodes=validated_design.n_nodes,
-    )
     _validate_minimum_observations(
         validated_design,
         options=validated_options,
     )
 
-    component_id = build_node_components(
-        validated_design.n_nodes,
-        validated_design.row_source_node_id,
-        validated_design.row_receiver_node_id,
+    graph = analyze_endpoint_sum_graph(
+        n_nodes=validated_design.n_nodes,
+        row_source_node_id=validated_design.row_source_node_id,
+        row_receiver_node_id=validated_design.row_receiver_node_id,
     )
-    n_components = _component_count(component_id)
-    _validate_disconnected_zero_damping_gauge(
-        n_components=n_components,
+    _validate_zero_regularization_gauge(
+        graph=graph,
         options=validated_options,
     )
 
@@ -487,12 +433,10 @@ def _build_time_term_solver_system(
         damping_lambda=validated_options.damping_lambda,
         damping_prior_s=damping_prior,
     )
-    gauge_matrix = build_gauge_matrix(
-        n_nodes=validated_design.n_nodes,
-        component_id_by_node=component_id,
+    gauge_matrix = _build_gauge_matrix(
+        graph=graph,
         gauge=validated_options.gauge,
         gauge_weight=validated_options.gauge_weight,
-        reference_node_id=reference_node_id,
     )
     gauge_data = np.zeros(gauge_matrix.shape[0], dtype=np.float64)
 
@@ -524,16 +468,23 @@ def _build_time_term_solver_system(
         n_nodes=validated_design.n_nodes,
         damping_prior_s=damping_prior,
         gauge_mode=validated_options.gauge,
-        component_id_by_node=component_id,
-        n_components=n_components,
+        component_id_by_node=graph.component_id_by_node,
+        n_components=graph.n_components,
+        is_bipartite_by_component=graph.is_bipartite_by_component,
+        signed_partition_by_node=graph.signed_partition_by_node,
+        gauge_required_by_component=graph.gauge_required_by_component,
+        n_bipartite_components=int(np.count_nonzero(graph.is_bipartite_by_component)),
         damping_lambda=validated_options.damping_lambda,
         gauge_weight=validated_options.gauge_weight,
-        reference_node_id=reference_node_id,
         min_total_observations_per_node=(
             validated_options.min_total_observations_per_node
         ),
         total_observation_count_by_node=(
             validated_design.total_observation_count_by_node
+        ),
+        endpoint_supported_trace_mask_sorted=_build_endpoint_supported_trace_mask(
+            validated_design,
+            options=validated_options,
         ),
     )
     return system, validated_design, validated_options
@@ -638,11 +589,11 @@ def _validate_options(
         name='damping_lambda',
     )
     gauge = _validate_gauge_mode(opts.gauge)
-    if gauge == 'none' and damping_lambda == 0.0:
-        raise ValueError("gauge='none' requires damping_lambda > 0")
     gauge_weight = _coerce_finite_float(opts.gauge_weight, name='gauge_weight')
-    if gauge != 'none' and gauge_weight <= 0.0:
-        raise ValueError('gauge_weight must be greater than 0 when gauge is not none')
+    if gauge == 'auto_component' and gauge_weight <= 0.0:
+        raise ValueError(
+            'gauge_weight must be greater than 0 when gauge is auto_component'
+        )
     solver = _validate_solver_name(opts.solver)
 
     return TimeTermSparseSolverOptions(
@@ -650,7 +601,6 @@ def _validate_options(
         damping_prior_s=opts.damping_prior_s,
         gauge=gauge,
         gauge_weight=gauge_weight,
-        reference_node_id=opts.reference_node_id,
         solver=solver,
         atol=_coerce_positive_finite_float(opts.atol, name='atol'),
         btol=_coerce_positive_finite_float(opts.btol, name='btol'),
@@ -668,6 +618,9 @@ def _validate_options(
             opts.require_all_nodes_observed,
             name='require_all_nodes_observed',
         ),
+        trace_prediction_policy=_validate_trace_prediction_policy(
+            opts.trace_prediction_policy
+        ),
         max_abs_node_time_term_ms=_coerce_optional_nonnegative_finite_float(
             opts.max_abs_node_time_term_ms,
             name='max_abs_node_time_term_ms',
@@ -677,6 +630,37 @@ def _validate_options(
             name='max_abs_estimated_trace_delay_ms',
         ),
     )
+
+
+def _build_trace_prediction_valid_mask(
+    design: _ValidatedTimeTermDesign,
+    *,
+    options: TimeTermSparseSolverOptions,
+) -> np.ndarray:
+    if options.trace_prediction_policy == 'fit_used_only':
+        return np.ascontiguousarray(
+            design.used_trace_mask_sorted,
+            dtype=bool,
+        )
+
+    return _build_endpoint_supported_trace_mask(design, options=options)
+
+
+def _build_endpoint_supported_trace_mask(
+    design: _ValidatedTimeTermDesign,
+    *,
+    options: TimeTermSparseSolverOptions,
+) -> np.ndarray:
+    support_threshold = max(1, int(options.min_total_observations_per_node))
+    node_supported = np.ascontiguousarray(
+        design.total_observation_count_by_node >= support_threshold,
+        dtype=bool,
+    )
+    endpoint_supported = (
+        node_supported[design.source_node_id_sorted]
+        & node_supported[design.receiver_node_id_sorted]
+    )
+    return np.ascontiguousarray(endpoint_supported, dtype=bool)
 
 
 def _validate_design(design: TimeTermDesignMatrix) -> _ValidatedTimeTermDesign:
@@ -802,19 +786,17 @@ def _validate_minimum_observations(
         )
 
 
-def _validate_disconnected_zero_damping_gauge(
+def _validate_zero_regularization_gauge(
     *,
-    n_components: int,
+    graph: EndpointSumGraphSummary,
     options: TimeTermSparseSolverOptions,
 ) -> None:
-    if (
-        options.damping_lambda == 0.0
-        and n_components > 1
-        and options.gauge != 'component_mean_zero'
-    ):
+    if options.damping_lambda != 0.0 or options.gauge != 'none':
+        return
+    if np.any(graph.gauge_required_by_component):
         raise ValueError(
-            'disconnected time-term systems with zero damping require '
-            "gauge='component_mean_zero'"
+            "gauge='none' with zero damping is only allowed when every "
+            'endpoint-sum component is non-bipartite and already full rank'
         )
 
 
@@ -834,36 +816,6 @@ def _coerce_damping_prior(values: float | np.ndarray, *, n_nodes: int) -> np.nda
     return prior
 
 
-def _resolve_options_reference_node_id(
-    reference_node_id: int | None,
-    *,
-    gauge: TimeTermGaugeMode,
-    n_nodes: int,
-) -> int | None:
-    if reference_node_id is not None:
-        return _resolve_reference_node_id(reference_node_id, n_nodes=n_nodes)
-    if gauge == 'reference_node':
-        return 0
-    return None
-
-
-def _resolve_reference_node_id(
-    reference_node_id: int | None,
-    *,
-    n_nodes: int,
-) -> int:
-    reference = 0 if reference_node_id is None else reference_node_id
-    if isinstance(reference, (bool, np.bool_)) or not isinstance(
-        reference,
-        (int, np.integer),
-    ):
-        raise ValueError('reference_node_id must be an integer')
-    out = int(reference)
-    if out < 0 or out >= n_nodes:
-        raise ValueError('reference_node_id must be within 0..n_nodes-1')
-    return out
-
-
 def _node_total_observation_count(
     row_source_node_id: np.ndarray,
     row_receiver_node_id: np.ndarray,
@@ -879,39 +831,6 @@ def _node_total_observation_count(
         copy=False,
     )
     return np.ascontiguousarray(source_count + receiver_count, dtype=np.int64)
-
-
-def _component_count(component_id_by_node: np.ndarray) -> int:
-    component_id = _coerce_1d_integer_int64(
-        component_id_by_node,
-        name='component_id_by_node',
-    )
-    if component_id.size == 0:
-        raise ValueError('component_id_by_node must be non-empty')
-    _validate_index_range(
-        component_id,
-        n_unique=int(np.max(component_id)) + 1,
-        name='component_id_by_node',
-    )
-    unique = np.unique(component_id)
-    expected = np.arange(unique.size, dtype=np.int64)
-    if not np.array_equal(unique, expected):
-        raise ValueError('component_id_by_node must be 0-based and contiguous')
-    return int(unique.size)
-
-
-def _validate_component_id_by_node(
-    component_id_by_node: np.ndarray,
-    *,
-    n_nodes: int,
-) -> np.ndarray:
-    component_id = _coerce_1d_integer_int64(
-        component_id_by_node,
-        name='component_id_by_node',
-        expected_shape=(n_nodes,),
-    )
-    _component_count(component_id)
-    return component_id
 
 
 def _coerce_sparse_matrix_float64_csr(matrix: object) -> sparse.csr_matrix:
@@ -988,7 +907,7 @@ def _validate_max_abs_ms(
 
 
 def _validate_gauge_mode(value: object) -> TimeTermGaugeMode:
-    if value in {'none', 'mean_zero', 'component_mean_zero', 'reference_node'}:
+    if value in {'auto_component', 'none'}:
         return value  # type: ignore[return-value]
     raise ValueError(f'unsupported gauge: {value!r}')
 
@@ -997,6 +916,12 @@ def _validate_solver_name(value: object) -> TimeTermSparseSolverName:
     if value in {'lsmr', 'lsqr'}:
         return value  # type: ignore[return-value]
     raise ValueError(f'unsupported solver: {value!r}')
+
+
+def _validate_trace_prediction_policy(value: object) -> TimeTermTracePredictionPolicy:
+    if value in {'all_supported', 'fit_used_only'}:
+        return value  # type: ignore[return-value]
+    raise ValueError(f'unsupported trace_prediction_policy: {value!r}')
 
 
 def _rms(values: np.ndarray) -> float:
@@ -1067,7 +992,7 @@ __all__ = [
     'TimeTermSparseSolverName',
     'TimeTermSparseSolverOptions',
     'TimeTermSparseSolverResult',
-    'build_gauge_matrix',
+    'TimeTermTracePredictionPolicy',
     'build_node_components',
     'build_time_term_solver_system',
     'solve_time_term_sparse_least_squares',

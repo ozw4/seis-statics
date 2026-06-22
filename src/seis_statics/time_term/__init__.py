@@ -33,6 +33,7 @@ from seis_statics.time_term.robust_solver import (
     build_time_term_outlier_mask,
     compute_time_term_robust_center_scale,
     solve_time_term_robust_least_squares,
+    summarize_time_term_robust_solver_result,
     validate_time_term_robust_options,
 )
 from seis_statics.time_term.types import (
@@ -46,7 +47,7 @@ from seis_statics.time_term.sparse_solver import (
     TimeTermSparseSolverName,
     TimeTermSparseSolverOptions,
     TimeTermSparseSolverResult,
-    build_gauge_matrix,
+    TimeTermTracePredictionPolicy,
     build_node_components,
     build_time_term_solver_system,
     solve_time_term_sparse_least_squares,
@@ -75,7 +76,7 @@ __all__ = [
     'TimeTermSparseSolverName',
     'TimeTermSparseSolverOptions',
     'TimeTermSparseSolverResult',
-    'build_gauge_matrix',
+    'TimeTermTracePredictionPolicy',
     'build_node_components',
     'build_reciprocal_pair_index',
     'build_time_term_outlier_mask',
@@ -90,6 +91,7 @@ __all__ = [
     'solve_time_term_robust_least_squares',
     'summarize_time_term_design_matrix',
     'summarize_time_term_moveout',
+    'summarize_time_term_robust_solver_result',
     'summarize_time_term_sparse_solver_result',
     'validate_time_term_robust_options',
 ]
