@@ -195,6 +195,18 @@ _HALF_INTERCEPT_EXPORTS = frozenset(
         'estimate_refraction_half_intercept_from_input_model',
     }
 )
+_WEATHERING_EXPORTS = frozenset(
+    {
+        'RefractionWeatheringEndpointComponents',
+        'RefractionWeatheringError',
+        'RefractionWeatheringModel',
+        'RefractionWeatheringThicknessComputation',
+        'build_refraction_weathering_model_from_half_intercept_result',
+        'compute_weathering_thickness_from_half_intercept_time',
+        'compute_weathering_thickness_from_half_intercept_time_with_status',
+        'compute_weathering_thickness_scalar_from_half_intercept_time',
+    }
+)
 
 
 def __getattr__(name: str) -> object:
@@ -220,6 +232,12 @@ def __getattr__(name: str) -> object:
         from seis_statics.refraction import half_intercept
 
         value = getattr(half_intercept, name)
+        globals()[name] = value
+        return value
+    if name in _WEATHERING_EXPORTS:
+        from seis_statics.refraction import weathering
+
+        value = getattr(weathering, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
@@ -284,6 +302,10 @@ __all__ = [
     'RefractionTraceFieldCorrectionResult',
     'RefractionV1EstimateResult',
     'RefractionV1EstimationError',
+    'RefractionWeatheringEndpointComponents',
+    'RefractionWeatheringError',
+    'RefractionWeatheringModel',
+    'RefractionWeatheringThicknessComputation',
     'RefractionStaticLayerKind',
     'RefractionStaticLayerAssignmentPolicy',
     'RefractionStaticLayerOptions',
@@ -326,6 +348,7 @@ __all__ = [
     'build_refraction_static_design_matrix',
     'build_refraction_static_design_matrix_from_arrays',
     'build_refraction_static_solver_system',
+    'build_refraction_weathering_model_from_half_intercept_result',
     'classify_refraction_endpoint_static_status',
     'compose_t1lsst_1layer_endpoint_component_rows',
     'compose_refraction_endpoint_field_corrections',
@@ -339,6 +362,9 @@ __all__ = [
     'compute_t1lsst_3layer_thicknesses',
     'compute_t1lsst_3layer_thicknesses_with_status',
     'compute_t1lsst_3layer_weathering_correction',
+    'compute_weathering_thickness_from_half_intercept_time',
+    'compute_weathering_thickness_from_half_intercept_time_with_status',
+    'compute_weathering_thickness_scalar_from_half_intercept_time',
     'compute_source_depth_weathering_time_correction',
     'compute_source_depth_weathering_time_correction_from_result',
     'compute_source_receiver_midpoints',
