@@ -23,6 +23,7 @@ from seis_statics._validation import (
 )
 from seis_statics._endpoint_sum_graph import (
     EndpointSumGraphSummary,
+    _build_endpoint_sum_prediction_identifiable_mask,
     analyze_endpoint_sum_graph,
     build_endpoint_sum_gauge_matrix,
 )
@@ -96,6 +97,7 @@ class TimeTermSolverSystem:
     min_total_observations_per_node: int
     total_observation_count_by_node: np.ndarray
     endpoint_supported_trace_mask_sorted: np.ndarray
+    endpoint_identifiable_trace_mask_sorted: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -106,8 +108,9 @@ class TimeTermSparseSolverResult:
     define where the final node model may be applied.
     ``prediction_valid_trace_mask_sorted`` marks traces eligible for final
     model application under the selected trace prediction policy. The
-    ``all_supported`` policy uses endpoint support from final used
-    observations; ``fit_used_only`` uses the final fit mask exactly.
+    ``all_supported`` policy uses traces whose endpoints are supported by final
+    used observations and whose endpoint sum is invariant over the final graph
+    null space; ``fit_used_only`` uses the final fit mask exactly.
     """
 
     node_time_term_s: np.ndarray
@@ -306,6 +309,11 @@ def summarize_time_term_sparse_solver_result(
         name='endpoint_supported_trace_mask_sorted',
         expected_shape=used_mask.shape,
     )
+    endpoint_identifiable_mask = _coerce_1d_bool_array(
+        system.endpoint_identifiable_trace_mask_sorted,
+        name='endpoint_identifiable_trace_mask_sorted',
+        expected_shape=used_mask.shape,
+    )
 
     return {
         'n_nodes': int(system.n_nodes),
@@ -357,6 +365,13 @@ def summarize_time_term_sparse_solver_result(
         ),
         'n_fit_used_traces': int(np.count_nonzero(used_mask)),
         'n_robust_rejected_traces': 0,
+        'n_endpoint_supported_traces': int(np.count_nonzero(endpoint_supported_mask)),
+        'n_prediction_identifiable_traces': int(
+            np.count_nonzero(endpoint_identifiable_mask)
+        ),
+        'n_endpoint_supported_prediction_invalid_due_to_gauge_traces': int(
+            np.count_nonzero(endpoint_supported_mask & ~endpoint_identifiable_mask)
+        ),
         'n_prediction_valid_traces': int(np.count_nonzero(prediction_mask)),
         'n_fit_unused_prediction_valid_traces': int(
             np.count_nonzero(~used_mask & prediction_mask)
@@ -490,6 +505,13 @@ def _build_time_term_solver_system(
         endpoint_supported_trace_mask_sorted=_build_endpoint_supported_trace_mask(
             validated_design,
             options=validated_options,
+        ),
+        endpoint_identifiable_trace_mask_sorted=(
+            _build_endpoint_identifiable_trace_mask(
+                validated_design,
+                options=validated_options,
+                graph=graph,
+            )
         ),
     )
     return system, validated_design, validated_options
@@ -649,7 +671,30 @@ def _build_trace_prediction_valid_mask(
             dtype=bool,
         )
 
-    return _build_endpoint_supported_trace_mask(design, options=options)
+    graph = analyze_endpoint_sum_graph(
+        n_nodes=design.n_nodes,
+        row_source_node_id=design.row_source_node_id,
+        row_receiver_node_id=design.row_receiver_node_id,
+    )
+    return _build_endpoint_identifiable_trace_mask(
+        design,
+        options=options,
+        graph=graph,
+    )
+
+
+def _build_endpoint_identifiable_trace_mask(
+    design: _ValidatedTimeTermDesign,
+    *,
+    options: TimeTermSparseSolverOptions,
+    graph: EndpointSumGraphSummary,
+) -> np.ndarray:
+    return _build_endpoint_sum_prediction_identifiable_mask(
+        graph=graph,
+        source_node_id=design.source_node_id_sorted,
+        receiver_node_id=design.receiver_node_id_sorted,
+        node_supported_mask=_build_node_supported_mask(design, options=options),
+    )
 
 
 def _build_endpoint_supported_trace_mask(
@@ -657,16 +702,24 @@ def _build_endpoint_supported_trace_mask(
     *,
     options: TimeTermSparseSolverOptions,
 ) -> np.ndarray:
-    support_threshold = max(1, int(options.min_total_observations_per_node))
-    node_supported = np.ascontiguousarray(
-        design.total_observation_count_by_node >= support_threshold,
-        dtype=bool,
-    )
+    node_supported = _build_node_supported_mask(design, options=options)
     endpoint_supported = (
         node_supported[design.source_node_id_sorted]
         & node_supported[design.receiver_node_id_sorted]
     )
     return np.ascontiguousarray(endpoint_supported, dtype=bool)
+
+
+def _build_node_supported_mask(
+    design: _ValidatedTimeTermDesign,
+    *,
+    options: TimeTermSparseSolverOptions,
+) -> np.ndarray:
+    support_threshold = max(1, int(options.min_total_observations_per_node))
+    return np.ascontiguousarray(
+        design.total_observation_count_by_node >= support_threshold,
+        dtype=bool,
+    )
 
 
 def _validate_design(design: TimeTermDesignMatrix) -> _ValidatedTimeTermDesign:

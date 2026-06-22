@@ -9,6 +9,7 @@ import numpy as np
 from scipy import sparse
 
 from seis_statics._validation import (
+    coerce_1d_bool_array as _coerce_1d_bool_array,
     coerce_1d_integer_int64 as _common_coerce_1d_integer_int64,
     coerce_finite_float as _coerce_finite_float,
     coerce_positive_int as _coerce_positive_int,
@@ -180,6 +181,62 @@ def build_endpoint_sum_gauge_matrix(
     return matrix
 
 
+def _build_endpoint_sum_prediction_identifiable_mask(
+    *,
+    graph: EndpointSumGraphSummary,
+    source_node_id: np.ndarray,
+    receiver_node_id: np.ndarray,
+    node_supported_mask: np.ndarray,
+) -> np.ndarray:
+    """Return traces whose endpoint sum is invariant over graph null vectors."""
+    component_id = _coerce_component_ids(graph.component_id_by_node, graph=graph)
+    n_nodes = int(component_id.shape[0])
+    source = _coerce_node_ids(
+        source_node_id,
+        n_nodes=n_nodes,
+        name='source_node_id',
+    )
+    receiver = _coerce_node_ids(
+        receiver_node_id,
+        n_nodes=n_nodes,
+        name='receiver_node_id',
+    )
+    if source.shape != receiver.shape:
+        raise ValueError('source_node_id and receiver_node_id must match')
+
+    node_supported = _coerce_1d_bool_array(
+        node_supported_mask,
+        name='node_supported_mask',
+        expected_shape=(n_nodes,),
+    )
+    signed_partition = _coerce_signed_partition(
+        graph.signed_partition_by_node,
+        expected_shape=(n_nodes,),
+    )
+    gauge_required = np.asarray(graph.gauge_required_by_component, dtype=bool)
+
+    source_component = component_id[source]
+    receiver_component = component_id[receiver]
+    source_gauge_required = gauge_required[source_component]
+    receiver_gauge_required = gauge_required[receiver_component]
+
+    endpoint_supported = node_supported[source] & node_supported[receiver]
+    same_component = source_component == receiver_component
+    same_component_identifiable = (
+        ~source_gauge_required
+        | (signed_partition[source] + signed_partition[receiver] == 0)
+    )
+    different_component_identifiable = (
+        ~source_gauge_required & ~receiver_gauge_required
+    )
+    identifiable = endpoint_supported & np.where(
+        same_component,
+        same_component_identifiable,
+        different_component_identifiable,
+    )
+    return np.ascontiguousarray(identifiable, dtype=bool)
+
+
 def _coerce_node_ids(values: np.ndarray, *, n_nodes: int, name: str) -> np.ndarray:
     arr = _common_coerce_1d_integer_int64(
         values,
@@ -224,6 +281,22 @@ def _coerce_component_ids(
         if not np.issubdtype(arr.dtype, np.bool_):
             raise ValueError(f'{name} must have bool dtype')
     return np.ascontiguousarray(component_id, dtype=np.int64)
+
+
+def _coerce_signed_partition(
+    values: np.ndarray,
+    *,
+    expected_shape: tuple[int, ...],
+) -> np.ndarray:
+    arr = _common_coerce_1d_integer_int64(
+        values,
+        name='graph.signed_partition_by_node',
+        allow_integer_like_float=False,
+        expected_shape=expected_shape,
+    )
+    if np.any((arr != -1) & (arr != 1)):
+        raise ValueError('graph.signed_partition_by_node must contain only -1 or 1')
+    return np.ascontiguousarray(arr, dtype=np.int8)
 
 
 def _coerce_nonnegative_int(value: object, *, name: str) -> int:

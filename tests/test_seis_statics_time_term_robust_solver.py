@@ -68,6 +68,55 @@ def _grid_design(
     return TimeTermDesignMatrix(**payload)
 
 
+def _bridge_outlier_design() -> TimeTermDesignMatrix:
+    used_source = np.asarray([0, 1, 2, 3, 4, 5, 6, 7, 3], dtype=np.int64)
+    used_receiver = np.asarray([1, 2, 3, 0, 5, 6, 7, 4, 4], dtype=np.int64)
+    n_nodes = 8
+    n_observations = int(used_source.shape[0])
+    candidate_source = np.asarray([0], dtype=np.int64)
+    candidate_receiver = np.asarray([7], dtype=np.int64)
+    source_node = np.concatenate([used_source, candidate_source])
+    receiver_node = np.concatenate([used_receiver, candidate_receiver])
+    n_traces = int(source_node.shape[0])
+    row_data = np.zeros(n_observations, dtype=np.float64)
+    row_data[-1] = 0.1
+    used_mask = np.zeros(n_traces, dtype=bool)
+    used_mask[:n_observations] = True
+    trace_to_row = np.full(n_traces, -1, dtype=np.int64)
+    trace_to_row[:n_observations] = np.arange(n_observations, dtype=np.int64)
+    source_count = np.bincount(used_source, minlength=n_nodes).astype(np.int64)
+    receiver_count = np.bincount(used_receiver, minlength=n_nodes).astype(np.int64)
+
+    return TimeTermDesignMatrix(
+        matrix=_matrix(
+            used_source,
+            used_receiver,
+            n_observations=n_observations,
+            n_nodes=n_nodes,
+        ),
+        data_s=row_data,
+        n_traces=n_traces,
+        n_observations=n_observations,
+        n_nodes=n_nodes,
+        used_trace_mask_sorted=used_mask,
+        row_trace_index_sorted=np.arange(n_observations, dtype=np.int64),
+        trace_to_row_index_sorted=trace_to_row,
+        source_node_id_sorted=np.ascontiguousarray(source_node, dtype=np.int64),
+        receiver_node_id_sorted=np.ascontiguousarray(receiver_node, dtype=np.int64),
+        row_source_node_id=used_source,
+        row_receiver_node_id=used_receiver,
+        row_pick_time_after_static_s=row_data.copy(),
+        row_moveout_time_s=np.zeros(n_observations, dtype=np.float64),
+        row_data_s=row_data.copy(),
+        source_observation_count_by_node=source_count,
+        receiver_observation_count_by_node=receiver_count,
+        total_observation_count_by_node=np.ascontiguousarray(
+            source_count + receiver_count,
+            dtype=np.int64,
+        ),
+    )
+
+
 def _matrix(
     source_node: np.ndarray,
     receiver_node: np.ndarray,
@@ -242,3 +291,38 @@ def test_rejected_trace_fit_used_only_prediction_policy_keeps_nan_delay() -> Non
     assert summary['n_prediction_valid_traces'] == delay.shape[0] - 1
     assert summary['n_fit_unused_prediction_valid_traces'] == 0
     assert summary['n_unsupported_endpoint_traces'] == 0
+
+
+def test_robust_prediction_uses_final_graph_after_bridge_rejection() -> None:
+    result = solve_time_term_robust_least_squares(
+        _bridge_outlier_design(),
+        sparse_solver_options=_options(
+            damping_lambda=100.0,
+            max_abs_node_time_term_ms=None,
+            max_abs_estimated_trace_delay_ms=None,
+        ),
+        robust_options=TimeTermRobustOptions(
+            method='mad',
+            threshold=3.0,
+            max_iterations=1,
+            min_used_count=8,
+        ),
+    )
+
+    initial_mask = result.initial_solver_result.prediction_valid_trace_mask_sorted
+    final_mask = result.final_solver_result.prediction_valid_trace_mask_sorted
+    delay = result.final_solver_result.estimated_trace_time_term_delay_s_sorted
+    summary = summarize_time_term_robust_solver_result(result)
+
+    assert result.rejected_trace_mask_sorted[8].item() is True
+    assert initial_mask[9].item() is True
+    assert final_mask[9].item() is False
+    assert np.isnan(delay[9])
+    assert result.n_endpoint_supported_traces == 10
+    assert result.n_prediction_identifiable_traces == 8
+    assert result.n_endpoint_supported_prediction_invalid_due_to_gauge_traces == 2
+    assert summary['n_endpoint_supported_traces'] == 10
+    assert summary['n_prediction_identifiable_traces'] == 8
+    assert (
+        summary['n_endpoint_supported_prediction_invalid_due_to_gauge_traces'] == 2
+    )

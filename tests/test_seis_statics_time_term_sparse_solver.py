@@ -122,6 +122,82 @@ def _accurate_options(**overrides: Any) -> TimeTermSparseSolverOptions:
     return TimeTermSparseSolverOptions(**payload)
 
 
+def _node_sum_matrix(
+    source_node_id: np.ndarray,
+    receiver_node_id: np.ndarray,
+    *,
+    n_nodes: int,
+) -> sparse.csr_matrix:
+    n_observations = int(source_node_id.shape[0])
+    row = np.repeat(np.arange(n_observations, dtype=np.int64), 2)
+    col = np.empty(n_observations * 2, dtype=np.int64)
+    col[0::2] = source_node_id
+    col[1::2] = receiver_node_id
+    data = np.ones(n_observations * 2, dtype=np.float64)
+    matrix = sparse.coo_matrix(
+        (data, (row, col)),
+        shape=(n_observations, n_nodes),
+        dtype=np.float64,
+    ).tocsr()
+    matrix.sum_duplicates()
+    matrix.sort_indices()
+    return matrix
+
+
+def _design_from_used_and_candidates(
+    *,
+    used_source_node_id: np.ndarray,
+    used_receiver_node_id: np.ndarray,
+    candidate_source_node_id: np.ndarray,
+    candidate_receiver_node_id: np.ndarray,
+    n_nodes: int,
+    true_node_time_term_s: np.ndarray,
+) -> TimeTermDesignMatrix:
+    row_data = (
+        true_node_time_term_s[used_source_node_id]
+        + true_node_time_term_s[used_receiver_node_id]
+    )
+    source_node_id = np.concatenate([used_source_node_id, candidate_source_node_id])
+    receiver_node_id = np.concatenate([used_receiver_node_id, candidate_receiver_node_id])
+    n_observations = int(used_source_node_id.shape[0])
+    n_traces = int(source_node_id.shape[0])
+    used_mask = np.zeros(n_traces, dtype=bool)
+    used_mask[:n_observations] = True
+    trace_to_row = np.full(n_traces, -1, dtype=np.int64)
+    trace_to_row[:n_observations] = np.arange(n_observations, dtype=np.int64)
+    source_count = np.bincount(used_source_node_id, minlength=n_nodes).astype(np.int64)
+    receiver_count = np.bincount(used_receiver_node_id, minlength=n_nodes).astype(
+        np.int64
+    )
+    return TimeTermDesignMatrix(
+        matrix=_node_sum_matrix(
+            used_source_node_id,
+            used_receiver_node_id,
+            n_nodes=n_nodes,
+        ),
+        data_s=np.ascontiguousarray(row_data, dtype=np.float64),
+        n_traces=n_traces,
+        n_observations=n_observations,
+        n_nodes=n_nodes,
+        used_trace_mask_sorted=used_mask,
+        row_trace_index_sorted=np.arange(n_observations, dtype=np.int64),
+        trace_to_row_index_sorted=trace_to_row,
+        source_node_id_sorted=np.ascontiguousarray(source_node_id, dtype=np.int64),
+        receiver_node_id_sorted=np.ascontiguousarray(receiver_node_id, dtype=np.int64),
+        row_source_node_id=np.ascontiguousarray(used_source_node_id, dtype=np.int64),
+        row_receiver_node_id=np.ascontiguousarray(used_receiver_node_id, dtype=np.int64),
+        row_pick_time_after_static_s=np.ascontiguousarray(row_data, dtype=np.float64),
+        row_moveout_time_s=np.zeros(n_observations, dtype=np.float64),
+        row_data_s=np.ascontiguousarray(row_data, dtype=np.float64),
+        source_observation_count_by_node=source_count,
+        receiver_observation_count_by_node=receiver_count,
+        total_observation_count_by_node=np.ascontiguousarray(
+            source_count + receiver_count,
+            dtype=np.int64,
+        ),
+    )
+
+
 def test_time_term_solver_system_contains_observation_damping_and_gauge_rows() -> None:
     system = build_time_term_solver_system(
         _design(),
@@ -441,6 +517,72 @@ def test_time_term_sparse_solver_unsupported_endpoint_prediction_stays_nan() -> 
     assert np.isnan(result.estimated_trace_time_term_delay_s_sorted[4])
 
 
+def test_time_term_sparse_solver_invalidates_cross_component_bipartite_prediction() -> None:
+    design = _design_from_used_and_candidates(
+        used_source_node_id=np.asarray([0, 2], dtype=np.int64),
+        used_receiver_node_id=np.asarray([1, 3], dtype=np.int64),
+        candidate_source_node_id=np.asarray([0], dtype=np.int64),
+        candidate_receiver_node_id=np.asarray([3], dtype=np.int64),
+        n_nodes=4,
+        true_node_time_term_s=np.asarray([0.01, 0.02, 0.03, 0.04], dtype=np.float64),
+    )
+
+    result = solve_time_term_sparse_least_squares(
+        design,
+        options=_accurate_options(
+            damping_lambda=0.01,
+            gauge='auto_component',
+        ),
+    )
+    summary = summarize_time_term_sparse_solver_result(result)
+
+    np.testing.assert_array_equal(
+        result.prediction_valid_trace_mask_sorted,
+        [True, True, False],
+    )
+    assert np.isnan(result.estimated_trace_time_term_delay_s_sorted[2])
+    assert summary['n_endpoint_supported_traces'] == 3
+    assert summary['n_prediction_identifiable_traces'] == 2
+    assert (
+        summary['n_endpoint_supported_prediction_invalid_due_to_gauge_traces'] == 1
+    )
+    assert summary['n_unsupported_endpoint_traces'] == 0
+
+
+def test_time_term_sparse_solver_allows_cross_component_nonbipartite_prediction() -> None:
+    design = _design_from_used_and_candidates(
+        used_source_node_id=np.asarray([0, 1, 2, 3, 4, 5], dtype=np.int64),
+        used_receiver_node_id=np.asarray([1, 2, 0, 4, 5, 3], dtype=np.int64),
+        candidate_source_node_id=np.asarray([0], dtype=np.int64),
+        candidate_receiver_node_id=np.asarray([3], dtype=np.int64),
+        n_nodes=6,
+        true_node_time_term_s=np.asarray(
+            [0.01, 0.02, 0.03, -0.01, -0.02, -0.03],
+            dtype=np.float64,
+        ),
+    )
+
+    result = solve_time_term_sparse_least_squares(
+        design,
+        options=_accurate_options(
+            damping_lambda=0.0,
+            gauge='none',
+        ),
+    )
+    summary = summarize_time_term_sparse_solver_result(result)
+
+    np.testing.assert_array_equal(
+        result.prediction_valid_trace_mask_sorted,
+        [True, True, True, True, True, True, True],
+    )
+    assert np.isfinite(result.estimated_trace_time_term_delay_s_sorted[6])
+    assert summary['n_endpoint_supported_traces'] == 7
+    assert summary['n_prediction_identifiable_traces'] == 7
+    assert (
+        summary['n_endpoint_supported_prediction_invalid_due_to_gauge_traces'] == 0
+    )
+
+
 def test_time_term_sparse_solver_same_source_receiver_node_uses_two_times_node_term() -> None:
     result = solve_time_term_sparse_least_squares(
         _design(),
@@ -508,6 +650,9 @@ def test_summarize_time_term_sparse_solver_result_is_json_safe() -> None:
     assert summary['n_unobserved_nodes'] == 0
     assert summary['n_fit_used_traces'] == 4
     assert summary['n_robust_rejected_traces'] == 0
+    assert summary['n_endpoint_supported_traces'] == 5
+    assert summary['n_prediction_identifiable_traces'] == 5
+    assert summary['n_endpoint_supported_prediction_invalid_due_to_gauge_traces'] == 0
     assert summary['n_prediction_valid_traces'] == 5
     assert summary['n_fit_unused_prediction_valid_traces'] == 1
     assert summary['n_unsupported_endpoint_traces'] == 0
