@@ -273,6 +273,74 @@ def test_half_intercept_bedrock_convenience_uses_public_bedrock_result() -> None
     )
 
 
+def test_half_intercept_bedrock_convenience_matches_direct_non_identity_trace_order() -> None:
+    input_model = replace(
+        _global_input_model(),
+        sorted_trace_index=np.asarray([2, 0, 5, 1, 3, 4], dtype=np.int64),
+    )
+    direct_result = estimate_refraction_half_intercept_from_input_model(
+        input_model=input_model,
+        model=_global_model(),
+        solver_options=_solver_options(),
+    )
+    bedrock_result = estimate_global_bedrock_slowness_from_input_model(
+        input_model=input_model,
+        model=_global_model(),
+        solver_options=_solver_options(),
+    )
+
+    result = build_refraction_half_intercept_result_from_bedrock_result(
+        input_model=input_model,
+        bedrock_result=bedrock_result,
+    )
+
+    np.testing.assert_allclose(
+        result.modeled_pick_time_s_sorted,
+        direct_result.modeled_pick_time_s_sorted,
+        atol=1.0e-10,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        result.residual_s_sorted,
+        direct_result.residual_s_sorted,
+        atol=1.0e-10,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        result.residual_ms_sorted,
+        direct_result.residual_ms_sorted,
+        atol=1.0e-7,
+        equal_nan=True,
+    )
+    np.testing.assert_array_equal(
+        result.used_observation_mask_sorted,
+        direct_result.used_observation_mask_sorted,
+    )
+    np.testing.assert_array_equal(
+        result.rejected_observation_mask_sorted,
+        direct_result.rejected_observation_mask_sorted,
+    )
+    np.testing.assert_array_equal(
+        result.rejected_iteration_sorted,
+        direct_result.rejected_iteration_sorted,
+    )
+    np.testing.assert_array_equal(
+        result.node_rejected_observation_count,
+        direct_result.node_rejected_observation_count,
+    )
+    np.testing.assert_array_equal(
+        result.source_endpoint.used_observation_count,
+        direct_result.source_endpoint.used_observation_count,
+    )
+    np.testing.assert_array_equal(
+        result.receiver_endpoint.used_observation_count,
+        direct_result.receiver_endpoint.used_observation_count,
+    )
+    assert result.qc['residual_statistics'] == pytest.approx(
+        direct_result.qc['residual_statistics']
+    )
+
+
 def test_half_intercept_bedrock_convenience_can_include_debug_objects() -> None:
     bedrock_result = estimate_global_bedrock_slowness_from_input_model(
         input_model=_global_input_model(),

@@ -176,6 +176,7 @@ class _HalfInterceptSolution:
     n_rejected_observations: int
 
     qc: dict[str, Any]
+    trace_arrays_are_sorted: bool
 
 
 def build_refraction_half_intercept_result(
@@ -210,14 +211,14 @@ def _build_refraction_half_intercept_result_from_solution(
 ) -> RefractionHalfInterceptResult:
     solve_result = solution
     trace_index = np.ascontiguousarray(input_model.sorted_trace_index, dtype=np.int64)
-    used_mask = _trace_indexed_to_sorted_bool(
-        solve_result.used_observation_mask_sorted,
-        trace_index,
-    )
-    rejected_mask = _trace_indexed_to_sorted_bool(
-        solve_result.rejected_observation_mask_sorted,
-        trace_index,
-    )
+    (
+        modeled_pick_time_s_sorted,
+        residual_s_sorted,
+        residual_ms_sorted,
+        used_mask,
+        rejected_mask,
+        rejected_iteration_sorted,
+    ) = _solution_trace_arrays_sorted(solve_result, trace_index)
 
     node_pick_count = _node_count_for_mask(
         input_model=input_model,
@@ -275,8 +276,8 @@ def _build_refraction_half_intercept_result_from_solution(
     )
 
     residual_stats = _residual_statistics(
-        solve_result.residual_s_sorted,
-        used_mask=solve_result.used_observation_mask_sorted,
+        residual_s_sorted,
+        used_mask=used_mask,
     )
     qc = _build_qc(
         input_model=input_model,
@@ -320,24 +321,12 @@ def _build_refraction_half_intercept_result_from_solution(
         trace_half_intercept_time_s_sorted=trace_half_intercept,
         trace_half_intercept_status_sorted=trace_status,
         pick_time_s_sorted=np.ascontiguousarray(input_model.pick_time_s_sorted),
-        modeled_pick_time_s_sorted=_trace_indexed_to_sorted_float(
-            solve_result.modeled_pick_time_s_sorted,
-            trace_index,
-        ),
-        residual_s_sorted=_trace_indexed_to_sorted_float(
-            solve_result.residual_s_sorted,
-            trace_index,
-        ),
-        residual_ms_sorted=_trace_indexed_to_sorted_float(
-            solve_result.residual_ms_sorted,
-            trace_index,
-        ),
+        modeled_pick_time_s_sorted=modeled_pick_time_s_sorted,
+        residual_s_sorted=residual_s_sorted,
+        residual_ms_sorted=residual_ms_sorted,
         used_observation_mask_sorted=used_mask,
         rejected_observation_mask_sorted=rejected_mask,
-        rejected_iteration_sorted=_trace_indexed_to_sorted_int(
-            solve_result.rejected_iteration_sorted,
-            trace_index,
-        ),
+        rejected_iteration_sorted=rejected_iteration_sorted,
         cell_id=solve_result.cell_id,
         cell_bedrock_slowness_s_per_m=solve_result.cell_bedrock_slowness_s_per_m,
         cell_bedrock_velocity_m_s=solve_result.cell_bedrock_velocity_m_s,
@@ -509,6 +498,7 @@ def _solution_from_solve_result(
         n_final_used_observations=solve_result.n_final_used_observations,
         n_rejected_observations=solve_result.n_rejected_observations,
         qc=solve_result.qc,
+        trace_arrays_are_sorted=False,
     )
 
 
@@ -558,6 +548,7 @@ def _solution_from_bedrock_result(
         n_final_used_observations=bedrock_result.n_final_used_observations,
         n_rejected_observations=bedrock_result.n_rejected_observations,
         qc=bedrock_result.qc,
+        trace_arrays_are_sorted=True,
     )
 
 
@@ -898,6 +889,57 @@ def _trace_half_intercept_status(
     invalid_value = ~np.isfinite(source_t1) | ~np.isfinite(receiver_t1)
     status[invalid_value & (status == 'solved')] = 'invalid_half_intercept'
     return np.ascontiguousarray(status)
+
+
+def _solution_trace_arrays_sorted(
+    solution: _HalfInterceptSolution,
+    trace_index: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if solution.trace_arrays_are_sorted:
+        return (
+            np.ascontiguousarray(
+                np.asarray(solution.modeled_pick_time_s_sorted, dtype=np.float64)
+            ),
+            np.ascontiguousarray(np.asarray(solution.residual_s_sorted, dtype=np.float64)),
+            np.ascontiguousarray(
+                np.asarray(solution.residual_ms_sorted, dtype=np.float64)
+            ),
+            np.ascontiguousarray(
+                np.asarray(solution.used_observation_mask_sorted, dtype=bool)
+            ),
+            np.ascontiguousarray(
+                np.asarray(solution.rejected_observation_mask_sorted, dtype=bool)
+            ),
+            np.ascontiguousarray(
+                np.asarray(solution.rejected_iteration_sorted, dtype=np.int64)
+            ),
+        )
+    return (
+        _trace_indexed_to_sorted_float(
+            solution.modeled_pick_time_s_sorted,
+            trace_index,
+        ),
+        _trace_indexed_to_sorted_float(
+            solution.residual_s_sorted,
+            trace_index,
+        ),
+        _trace_indexed_to_sorted_float(
+            solution.residual_ms_sorted,
+            trace_index,
+        ),
+        _trace_indexed_to_sorted_bool(
+            solution.used_observation_mask_sorted,
+            trace_index,
+        ),
+        _trace_indexed_to_sorted_bool(
+            solution.rejected_observation_mask_sorted,
+            trace_index,
+        ),
+        _trace_indexed_to_sorted_int(
+            solution.rejected_iteration_sorted,
+            trace_index,
+        ),
+    )
 
 
 def _trace_indexed_to_sorted_float(
