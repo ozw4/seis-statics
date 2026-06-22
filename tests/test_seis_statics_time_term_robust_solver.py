@@ -293,7 +293,7 @@ def test_rejected_trace_fit_used_only_prediction_policy_keeps_nan_delay() -> Non
     assert summary['n_unsupported_endpoint_traces'] == 0
 
 
-def test_robust_prediction_uses_final_graph_after_bridge_rejection() -> None:
+def test_robust_positive_damping_uses_final_graph_after_bridge_rejection() -> None:
     result = solve_time_term_robust_least_squares(
         _bridge_outlier_design(),
         sparse_solver_options=_options(
@@ -315,6 +315,10 @@ def test_robust_prediction_uses_final_graph_after_bridge_rejection() -> None:
     summary = summarize_time_term_robust_solver_result(result)
 
     assert result.rejected_trace_mask_sorted[8].item() is True
+    assert result.initial_solver_result.system.n_gauge_rows == 0
+    assert result.final_solver_result.system.n_gauge_rows == 0
+    assert result.initial_solver_result.system.gauge_resolution == 'tikhonov_prior'
+    assert result.final_solver_result.system.gauge_resolution == 'tikhonov_prior'
     assert initial_mask[9].item() is True
     assert final_mask[9].item() is False
     assert np.isnan(delay[9])

@@ -152,6 +152,8 @@ min ||A x - b||^2 + damping_lambda ||x - damping_prior_s||^2
 
 Its augmented damping rows therefore use `sqrt(damping_lambda)`, not
 `damping_lambda`, as the row coefficient.
+When `damping_lambda > 0`, the prior resolves the source/receiver gauge, so the
+solver does not add a separate zero-gauge penalty row.
 
 The final trace shift is the sum of already-applied datum and residual shifts
 plus the time-term weathering shift:

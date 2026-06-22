@@ -38,6 +38,11 @@ TimeTermGaugeMode = Literal[
     'auto_component',
     'none',
 ]
+TimeTermGaugeResolution = Literal[
+    'tikhonov_prior',
+    'component_signed_rows',
+    'already_full_rank',
+]
 TimeTermSparseSolverName = Literal['lsmr', 'lsqr']
 TimeTermTracePredictionPolicy = Literal['all_supported', 'fit_used_only']
 
@@ -49,6 +54,8 @@ class TimeTermSparseSolverOptions:
     ``damping_lambda`` is the objective-level Tikhonov coefficient in
     ``||A x - b||^2 + lambda ||x - damping_prior_s||^2``. Augmented damping
     rows therefore use ``sqrt(damping_lambda)`` as their coefficient.
+    When ``damping_lambda > 0``, the Tikhonov prior uniquely resolves node
+    parameters and no additional zero-gauge penalty rows are added.
     """
 
     damping_lambda: float = 0.01
@@ -85,6 +92,7 @@ class TimeTermSolverSystem:
 
     damping_prior_s: np.ndarray
     gauge_mode: TimeTermGaugeMode
+    gauge_resolution: TimeTermGaugeResolution
     component_id_by_node: np.ndarray
     n_components: int
     is_bipartite_by_component: np.ndarray
@@ -322,6 +330,7 @@ def summarize_time_term_sparse_solver_result(
         'n_damping_rows': int(system.n_damping_rows),
         'n_gauge_rows': int(system.n_gauge_rows),
         'gauge_mode': system.gauge_mode,
+        'gauge_resolution': system.gauge_resolution,
         'damping_lambda': _json_float(system.damping_lambda),
         'solver_name': result.solver_name,
         'solver_istop': int(result.solver_istop),
@@ -404,18 +413,38 @@ def _build_gauge_matrix(
     gauge: TimeTermGaugeMode,
     gauge_weight: float,
 ) -> sparse.csr_matrix:
+    n_nodes = int(graph.component_id_by_node.shape[0])
     if gauge == 'none':
-        return sparse.csr_matrix(
-            (0, int(graph.component_id_by_node.shape[0])),
-            dtype=np.float64,
-        )
+        return _empty_gauge_matrix(n_nodes)
     if gauge != 'auto_component':
         raise ValueError(f'unsupported gauge: {gauge!r}')
+    if not np.any(graph.gauge_required_by_component):
+        return _empty_gauge_matrix(n_nodes)
+    if gauge_weight <= 0.0:
+        raise ValueError(
+            'gauge_weight must be greater than 0 when gauge rows are required'
+        )
     return build_endpoint_sum_gauge_matrix(
         graph=graph,
-        n_columns=int(graph.component_id_by_node.shape[0]),
+        n_columns=n_nodes,
         gauge_weight=gauge_weight,
     )
+
+
+def _empty_gauge_matrix(n_nodes: int) -> sparse.csr_matrix:
+    return sparse.csr_matrix((0, n_nodes), dtype=np.float64)
+
+
+def _resolve_gauge_resolution(
+    *,
+    graph: EndpointSumGraphSummary,
+    options: TimeTermSparseSolverOptions,
+) -> TimeTermGaugeResolution:
+    if options.damping_lambda > 0.0:
+        return 'tikhonov_prior'
+    if np.any(graph.gauge_required_by_component):
+        return 'component_signed_rows'
+    return 'already_full_rank'
 
 
 def _build_time_term_solver_system(
@@ -453,11 +482,18 @@ def _build_time_term_solver_system(
         damping_lambda=validated_options.damping_lambda,
         damping_prior_s=damping_prior,
     )
-    gauge_matrix = _build_gauge_matrix(
+    gauge_resolution = _resolve_gauge_resolution(
         graph=graph,
-        gauge=validated_options.gauge,
-        gauge_weight=validated_options.gauge_weight,
+        options=validated_options,
     )
+    if gauge_resolution == 'tikhonov_prior':
+        gauge_matrix = _empty_gauge_matrix(validated_design.n_nodes)
+    else:
+        gauge_matrix = _build_gauge_matrix(
+            graph=graph,
+            gauge=validated_options.gauge,
+            gauge_weight=validated_options.gauge_weight,
+        )
     gauge_data = np.zeros(gauge_matrix.shape[0], dtype=np.float64)
 
     augmented_matrix = sparse.vstack(
@@ -488,6 +524,7 @@ def _build_time_term_solver_system(
         n_nodes=validated_design.n_nodes,
         damping_prior_s=damping_prior,
         gauge_mode=validated_options.gauge,
+        gauge_resolution=gauge_resolution,
         component_id_by_node=graph.component_id_by_node,
         n_components=graph.n_components,
         is_bipartite_by_component=graph.is_bipartite_by_component,
@@ -618,10 +655,6 @@ def _validate_options(
     )
     gauge = _validate_gauge_mode(opts.gauge)
     gauge_weight = _coerce_finite_float(opts.gauge_weight, name='gauge_weight')
-    if gauge == 'auto_component' and gauge_weight <= 0.0:
-        raise ValueError(
-            'gauge_weight must be greater than 0 when gauge is auto_component'
-        )
     solver = _validate_solver_name(opts.solver)
 
     return TimeTermSparseSolverOptions(
@@ -1047,6 +1080,7 @@ def _solver_message(solver: TimeTermSparseSolverName, istop: int) -> str:
 
 __all__ = [
     'TimeTermGaugeMode',
+    'TimeTermGaugeResolution',
     'TimeTermSolverSystem',
     'TimeTermSparseSolverName',
     'TimeTermSparseSolverOptions',
