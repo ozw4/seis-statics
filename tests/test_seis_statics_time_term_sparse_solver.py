@@ -346,12 +346,51 @@ def test_time_term_sparse_solver_returns_estimated_trace_delay_in_sorted_order()
         TRUE_NODE_TIME_TERM_S[SOURCE_NODE_ID_SORTED]
         + TRUE_NODE_TIME_TERM_S[RECEIVER_NODE_ID_SORTED]
     )
-    expected[~result.used_trace_mask_sorted] = np.nan
     np.testing.assert_allclose(
         result.estimated_trace_time_term_delay_s_sorted,
         expected,
         atol=1.0e-9,
         equal_nan=True,
+    )
+    np.testing.assert_array_equal(
+        result.prediction_valid_trace_mask_sorted,
+        [True, True, True, True, True],
+    )
+    assert result.used_trace_mask_sorted[4].item() is False
+    assert np.isfinite(result.estimated_trace_time_term_delay_s_sorted[4])
+
+
+def test_time_term_sparse_solver_fit_used_only_prediction_policy_limits_delay() -> None:
+    result = solve_time_term_sparse_least_squares(
+        _design(),
+        options=_accurate_options(trace_prediction_policy='fit_used_only'),
+    )
+    summary = summarize_time_term_sparse_solver_result(result)
+
+    np.testing.assert_array_equal(
+        result.prediction_valid_trace_mask_sorted,
+        result.used_trace_mask_sorted,
+    )
+    assert np.isnan(result.estimated_trace_time_term_delay_s_sorted[4])
+    assert summary['n_prediction_valid_traces'] == 4
+    assert summary['n_fit_unused_prediction_valid_traces'] == 0
+    assert summary['n_unsupported_endpoint_traces'] == 0
+
+
+def test_time_term_sparse_solver_unsupported_endpoint_prediction_stays_nan() -> None:
+    result = solve_time_term_sparse_least_squares(
+        _unobserved_node_design(),
+        options=_accurate_options(
+            damping_lambda=0.01,
+            gauge='component_mean_zero',
+            require_all_nodes_observed=False,
+            min_total_observations_per_node=0,
+        ),
+    )
+
+    np.testing.assert_array_equal(
+        result.prediction_valid_trace_mask_sorted,
+        [True, True, True, True, False],
     )
     assert np.isnan(result.estimated_trace_time_term_delay_s_sorted[4])
 
@@ -421,6 +460,11 @@ def test_summarize_time_term_sparse_solver_result_is_json_safe() -> None:
     assert summary['gauge_mode'] == 'none'
     assert summary['solver_name'] == 'lsmr'
     assert summary['n_unobserved_nodes'] == 0
+    assert summary['n_fit_used_traces'] == 4
+    assert summary['n_robust_rejected_traces'] == 0
+    assert summary['n_prediction_valid_traces'] == 5
+    assert summary['n_fit_unused_prediction_valid_traces'] == 1
+    assert summary['n_unsupported_endpoint_traces'] == 0
     assert summary['node_time_term_ms']['count'] == 3
 
 

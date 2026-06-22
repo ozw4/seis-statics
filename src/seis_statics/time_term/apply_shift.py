@@ -35,12 +35,13 @@ def delay_to_applied_shift(delay_s):
 def compose_time_term_applied_shifts(
     *,
     trace_time_term_delay_s_sorted: np.ndarray,
+    prediction_valid_trace_mask_sorted: np.ndarray,
     datum_applied_shift_s_sorted: np.ndarray,
     residual_applied_shift_s_sorted: np.ndarray,
     valid_trace_mask_sorted: np.ndarray | None = None,
     max_abs_final_applied_shift_ms: float | None = 1000.0,
 ) -> TimeTermAppliedShiftResult:
-    """Compose datum, residual, and weathering applied trace shifts."""
+    """Compose shifts using explicit time-term prediction eligibility."""
     time_term_delay = _coerce_1d_real_numeric_float64(
         trace_time_term_delay_s_sorted,
         name='trace_time_term_delay_s_sorted',
@@ -57,6 +58,15 @@ def compose_time_term_applied_shifts(
         name='residual_applied_shift_s_sorted',
         expected_shape=expected_shape,
     )
+    prediction_valid_mask = _coerce_1d_bool_array(
+        prediction_valid_trace_mask_sorted,
+        name='prediction_valid_trace_mask_sorted',
+        expected_shape=expected_shape,
+    )
+    if np.any(prediction_valid_mask & ~np.isfinite(time_term_delay)):
+        raise ValueError(
+            'trace_time_term_delay_s_sorted must be finite for prediction-valid traces'
+        )
     if valid_trace_mask_sorted is None:
         valid_mask = np.ones(expected_shape, dtype=bool)
     else:
@@ -68,7 +78,7 @@ def compose_time_term_applied_shifts(
 
     valid_shift_mask = np.ascontiguousarray(
         valid_mask
-        & np.isfinite(time_term_delay)
+        & prediction_valid_mask
         & np.isfinite(datum_shift)
         & np.isfinite(residual_shift),
         dtype=bool,

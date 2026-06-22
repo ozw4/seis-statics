@@ -35,10 +35,13 @@ TimeTermGaugeMode = Literal[
     'reference_node',
 ]
 TimeTermSparseSolverName = Literal['lsmr', 'lsqr']
+TimeTermTracePredictionPolicy = Literal['all_supported', 'fit_used_only']
 
 
 @dataclass(frozen=True)
 class TimeTermSparseSolverOptions:
+    """Options for fitting node terms and selecting trace prediction coverage."""
+
     damping_lambda: float = 0.01
     damping_prior_s: float | np.ndarray = 0.0
 
@@ -55,6 +58,7 @@ class TimeTermSparseSolverOptions:
     min_observations: int = 1
     min_total_observations_per_node: int = 1
     require_all_nodes_observed: bool = True
+    trace_prediction_policy: TimeTermTracePredictionPolicy = 'all_supported'
 
     max_abs_node_time_term_ms: float | None = 500.0
     max_abs_estimated_trace_delay_ms: float | None = 500.0
@@ -81,10 +85,20 @@ class TimeTermSolverSystem:
     reference_node_id: int | None
     min_total_observations_per_node: int
     total_observation_count_by_node: np.ndarray
+    endpoint_supported_trace_mask_sorted: np.ndarray
 
 
 @dataclass(frozen=True)
 class TimeTermSparseSolverResult:
+    """Sparse solve result.
+
+    ``used_trace_mask_sorted`` is fit eligibility for this solve. It does not
+    define where the final node model may be applied.
+    ``prediction_valid_trace_mask_sorted`` marks traces whose endpoint nodes are
+    supported by the final used observations under the selected trace prediction
+    policy.
+    """
+
     node_time_term_s: np.ndarray
     estimated_trace_time_term_delay_s_sorted: np.ndarray
     row_estimated_time_term_delay_s: np.ndarray
@@ -96,6 +110,7 @@ class TimeTermSparseSolverResult:
     rms_residual_after_s: float
 
     used_trace_mask_sorted: np.ndarray
+    prediction_valid_trace_mask_sorted: np.ndarray
     row_trace_index_sorted: np.ndarray
 
     solver_name: TimeTermSparseSolverName
@@ -184,26 +199,29 @@ def solve_time_term_sparse_least_squares(
         name='row_estimated_time_term_delay_s',
     )
 
-    used_trace_mask = validated_design.used_trace_mask_sorted
+    prediction_valid_mask = _build_trace_prediction_valid_mask(
+        validated_design,
+        options=validated_options,
+    )
     estimated_trace_delay = np.full(
         validated_design.n_traces,
         np.nan,
         dtype=np.float64,
     )
-    estimated_trace_delay[used_trace_mask] = (
-        node_time_term[validated_design.source_node_id_sorted[used_trace_mask]]
-        + node_time_term[validated_design.receiver_node_id_sorted[used_trace_mask]]
+    estimated_trace_delay[prediction_valid_mask] = (
+        node_time_term[validated_design.source_node_id_sorted[prediction_valid_mask]]
+        + node_time_term[validated_design.receiver_node_id_sorted[prediction_valid_mask]]
     )
     if estimated_trace_delay.shape != (validated_design.n_traces,):
         raise ValueError('estimated_trace_time_term_delay_s_sorted shape mismatch')
     _validate_all_finite(
-        estimated_trace_delay[used_trace_mask],
-        name='estimated_trace_time_term_delay_s_sorted used traces',
+        estimated_trace_delay[prediction_valid_mask],
+        name='estimated_trace_time_term_delay_s_sorted prediction-valid traces',
     )
     _validate_max_abs_ms(
-        estimated_trace_delay[used_trace_mask],
+        estimated_trace_delay[prediction_valid_mask],
         max_abs_ms=validated_options.max_abs_estimated_trace_delay_ms,
-        name='estimated_trace_time_term_delay_s_sorted used traces',
+        name='estimated_trace_time_term_delay_s_sorted prediction-valid traces',
         limit_name='max_abs_estimated_trace_delay_ms',
     )
 
@@ -228,6 +246,10 @@ def solve_time_term_sparse_least_squares(
         rms_residual_after_s=_rms(residual_after),
         used_trace_mask_sorted=np.ascontiguousarray(
             validated_design.used_trace_mask_sorted,
+            dtype=bool,
+        ),
+        prediction_valid_trace_mask_sorted=np.ascontiguousarray(
+            prediction_valid_mask,
             dtype=bool,
         ),
         row_trace_index_sorted=np.ascontiguousarray(
@@ -258,6 +280,20 @@ def summarize_time_term_sparse_solver_result(
     min_count = _coerce_nonnegative_int(
         system.min_total_observations_per_node,
         name='min_total_observations_per_node',
+    )
+    used_mask = _coerce_1d_bool_array(
+        result.used_trace_mask_sorted,
+        name='used_trace_mask_sorted',
+    )
+    prediction_mask = _coerce_1d_bool_array(
+        result.prediction_valid_trace_mask_sorted,
+        name='prediction_valid_trace_mask_sorted',
+        expected_shape=used_mask.shape,
+    )
+    endpoint_supported_mask = _coerce_1d_bool_array(
+        system.endpoint_supported_trace_mask_sorted,
+        name='endpoint_supported_trace_mask_sorted',
+        expected_shape=used_mask.shape,
     )
 
     return {
@@ -304,6 +340,15 @@ def summarize_time_term_sparse_solver_result(
             )
         ),
         'n_components': int(system.n_components),
+        'n_fit_used_traces': int(np.count_nonzero(used_mask)),
+        'n_robust_rejected_traces': 0,
+        'n_prediction_valid_traces': int(np.count_nonzero(prediction_mask)),
+        'n_fit_unused_prediction_valid_traces': int(
+            np.count_nonzero(~used_mask & prediction_mask)
+        ),
+        'n_unsupported_endpoint_traces': int(
+            np.count_nonzero(~endpoint_supported_mask)
+        ),
         'n_unobserved_nodes': int(np.count_nonzero(total_count == 0)),
         'n_nodes_below_min_observations': int(np.count_nonzero(total_count < min_count)),
     }
@@ -535,6 +580,10 @@ def _build_time_term_solver_system(
         total_observation_count_by_node=(
             validated_design.total_observation_count_by_node
         ),
+        endpoint_supported_trace_mask_sorted=_build_endpoint_supported_trace_mask(
+            validated_design,
+            options=validated_options,
+        ),
     )
     return system, validated_design, validated_options
 
@@ -668,6 +717,9 @@ def _validate_options(
             opts.require_all_nodes_observed,
             name='require_all_nodes_observed',
         ),
+        trace_prediction_policy=_validate_trace_prediction_policy(
+            opts.trace_prediction_policy
+        ),
         max_abs_node_time_term_ms=_coerce_optional_nonnegative_finite_float(
             opts.max_abs_node_time_term_ms,
             name='max_abs_node_time_term_ms',
@@ -677,6 +729,38 @@ def _validate_options(
             name='max_abs_estimated_trace_delay_ms',
         ),
     )
+
+
+def _build_trace_prediction_valid_mask(
+    design: _ValidatedTimeTermDesign,
+    *,
+    options: TimeTermSparseSolverOptions,
+) -> np.ndarray:
+    endpoint_supported = _build_endpoint_supported_trace_mask(design, options=options)
+    if options.trace_prediction_policy == 'fit_used_only':
+        return np.ascontiguousarray(
+            design.used_trace_mask_sorted & endpoint_supported,
+            dtype=bool,
+        )
+
+    return endpoint_supported
+
+
+def _build_endpoint_supported_trace_mask(
+    design: _ValidatedTimeTermDesign,
+    *,
+    options: TimeTermSparseSolverOptions,
+) -> np.ndarray:
+    support_threshold = max(1, int(options.min_total_observations_per_node))
+    node_supported = np.ascontiguousarray(
+        design.total_observation_count_by_node >= support_threshold,
+        dtype=bool,
+    )
+    endpoint_supported = (
+        node_supported[design.source_node_id_sorted]
+        & node_supported[design.receiver_node_id_sorted]
+    )
+    return np.ascontiguousarray(endpoint_supported, dtype=bool)
 
 
 def _validate_design(design: TimeTermDesignMatrix) -> _ValidatedTimeTermDesign:
@@ -999,6 +1083,12 @@ def _validate_solver_name(value: object) -> TimeTermSparseSolverName:
     raise ValueError(f'unsupported solver: {value!r}')
 
 
+def _validate_trace_prediction_policy(value: object) -> TimeTermTracePredictionPolicy:
+    if value in {'all_supported', 'fit_used_only'}:
+        return value  # type: ignore[return-value]
+    raise ValueError(f'unsupported trace_prediction_policy: {value!r}')
+
+
 def _rms(values: np.ndarray) -> float:
     arr = _coerce_1d_real_numeric_float64(values, name='rms values')
     _validate_all_finite(arr, name='rms values')
@@ -1067,6 +1157,7 @@ __all__ = [
     'TimeTermSparseSolverName',
     'TimeTermSparseSolverOptions',
     'TimeTermSparseSolverResult',
+    'TimeTermTracePredictionPolicy',
     'build_gauge_matrix',
     'build_node_components',
     'build_time_term_solver_system',
