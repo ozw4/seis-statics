@@ -50,6 +50,82 @@ symlink to, or add `seisviewer2d`/`app` paths at runtime.
 
 ## Main APIs
 
+### Time-term statics
+
+Use `seis_statics.time_term` for application-independent first-break time-term
+inversion after an application has already prepared sorted trace arrays and
+endpoint/node IDs.
+
+Main entrypoints:
+
+- `compute_time_term_moveout`
+- `build_time_term_design_matrix`
+- `solve_time_term_sparse_least_squares`
+- `solve_time_term_robust_least_squares`
+- `compose_time_term_applied_shifts`
+- `delay_to_applied_shift`
+
+Primary input/output dataclasses:
+
+- `TimeTermInversionInputs`
+- `TimeTermMoveoutConfig` and `TimeTermMoveoutResult`
+- `TimeTermDesignMatrix` and `TimeTermDesignMatrixOptions`
+- `TimeTermSparseSolverOptions` and `TimeTermSparseSolverResult`
+- `TimeTermRobustOptions` and `TimeTermRobustSolveResult`
+- `TimeTermAppliedShiftResult`
+
+The public API is exported from `seis_statics.time_term`; deeper modules remain
+available for focused tests and maintenance but should not carry application I/O.
+
+### Refraction statics
+
+Use `seis_statics.refraction` for numerical refraction-static building blocks:
+endpoint tables, first-layer V1 resolution, direct-arrival V1 estimation,
+half-intercept/GLI design matrices, robust least-squares solves, T1LST
+weathering calculations, datum conversion, field-static composition, and
+multi-layer time-term conversion.
+
+Main entrypoints:
+
+- `estimate_global_v1_from_direct_arrivals`
+- `build_refraction_static_design_matrix`
+- `build_refraction_static_design_matrix_from_arrays`
+- `solve_refraction_static_least_squares`
+- `solve_refraction_static_design_least_squares`
+- `compute_t1lsst_1layer_weathering_correction`
+- `compute_t1lsst_2layer_weathering_correction`
+- `compute_t1lsst_3layer_weathering_correction`
+- `build_refraction_multilayer_conversion`
+- `compute_refraction_multilayer_datum_statics_from_input_model`
+- `compose_refraction_final_trace_shift`
+
+Primary input/output dataclasses:
+
+- `RefractionStaticInputModel`
+- `RefractionEndpointTable`
+- `RefractionStaticModelOptions`, `RefractionStaticSolverOptions`,
+  `RefractionStaticMoveoutOptions`, `RefractionStaticDatumOptions`, and
+  `RefractionStaticConversionOptions`
+- `RefractionStaticDesignMatrix` and `RefractionStaticSolveResult`
+- `RefractionWeatheringModel`, `RefractionWeatheringReplacementResult`, and
+  `RefractionDatumStaticsResult`
+- `RefractionMultilayerTimeTermSolveResult` and
+  `RefractionMultilayerConversionResult`
+- `RefractionFieldComposedTraceShiftResult`
+
+Supported model scope is limited to the migrated public numerical core:
+
+- 1-layer GLI / T1LST weathering workflows
+- 2-layer and 3-layer T1LST thickness and weathering conversions
+- multi-layer time-term solves for `v2_t1`, `v3_t2`, and `vsub_t3`
+- global fixed/solved bedrock velocity and local cell V2 (`solve_cell`) modes
+
+Cell V2 mode solves a local bedrock slowness/velocity per refractor cell,
+projects midpoint cells to trace rows, reports `cell_v2_m_s` and
+`row_midpoint_v2_m_s`, and preserves low-fold/outside-grid status values.
+It does not create grids from SEG-Y or viewer state; callers pass arrays or
+normalized dataclasses.
+
 ### Source/receiver residual statics from lag observations
 
 Use this when lag observations are already estimated, for example from MAE/BlindTrace pilot traces and NCC.
@@ -165,6 +241,16 @@ final_applied_shift_s_sorted =
     + applied_weathering_shift_s_sorted
 ```
 
+Refraction field, weathering replacement, datum, uphole, source-depth, manual
+static, and T1LST outputs use the same trace-shift convention:
+
+```text
+corrected(t) = raw(t - shift_s)
+```
+
+A positive resolved delay therefore maps to a negative applied shift unless an
+input API explicitly accepts already-applied shifts.
+
 ## Invalid traces and zero weights
 
 `valid_mask=False` means the trace is not used as a valid lag observation. For such traces, the source/receiver delay prediction is not evaluated, and the result values are `NaN`:
@@ -254,3 +340,11 @@ scipy
 ```
 
 Application-specific dependencies such as `segyio`, `FastAPI`, `pydantic`, or viewer-related packages should not be required by this package.
+
+## Release Handoff
+
+Version `0.4.0` is the time-term/refraction handoff minor release. The next
+`seisviewer2d` migration step is to replace app imports with `seis_statics`
+package imports, then remove the local `seisviewer2d/seis_statics/` copy.
+This repository does not publish Git tags/releases and does not change
+`seisviewer2d` dependency pins in this handoff.
