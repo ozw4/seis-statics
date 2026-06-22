@@ -229,6 +229,16 @@ _DATUM_EXPORTS = frozenset(
         'smooth_refraction_floating_datum_elevation',
     }
 )
+_MULTILAYER_SOLVER_EXPORTS = frozenset(
+    {
+        'ROBUST_REJECTION_REASON',
+        'VELOCITY_ORDER_REJECTION_REASON',
+        'RefractionMultilayerTimeTermLayerResult',
+        'RefractionMultilayerTimeTermSolveResult',
+        'RefractionMultilayerTimeTermSolverError',
+        'solve_refraction_multilayer_time_terms',
+    }
+)
 
 
 def __getattr__(name: str) -> object:
@@ -274,6 +284,12 @@ def __getattr__(name: str) -> object:
         value = getattr(datum, name)
         globals()[name] = value
         return value
+    if name in _MULTILAYER_SOLVER_EXPORTS:
+        from seis_statics.refraction import multilayer_solver
+
+        value = getattr(multilayer_solver, name)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
 
 
@@ -294,6 +310,7 @@ __all__ = [
     'OUTSIDE_REFRACTOR_CELL_GRID_REASON',
     'REFRACTION_FIELD_CORRECTION_COMPONENT_NAMES',
     'REFRACTION_STATIC_STATUSES',
+    'ROBUST_REJECTION_REASON',
     'RefractionCellAssignment',
     'RefractionCellCoordinateMode',
     'RefractionCellGrid',
@@ -321,6 +338,9 @@ __all__ = [
     'RefractionLayerObservationMasks',
     'RefractionLayerVelocityMode',
     'RefractionManualStaticResult',
+    'RefractionMultilayerTimeTermLayerResult',
+    'RefractionMultilayerTimeTermSolveResult',
+    'RefractionMultilayerTimeTermSolverError',
     'RefractionManualStaticTableRow',
     'RefractionSourceDepthMode',
     'RefractionSourceDepthResult',
@@ -376,6 +396,7 @@ __all__ = [
     'ResolvedRefractionFirstLayer',
     'ResolvedFloatingDatum',
     'T1LSST_SIGN_CONVENTION',
+    'VELOCITY_ORDER_REJECTION_REASON',
     'assign_observation_midpoint_cells',
     'assign_points_to_refraction_cells',
     'build_refraction_layer_observation_masks',
@@ -441,6 +462,7 @@ __all__ = [
     'resolved_first_layer_weathering_velocity_m_s',
     'solve_refraction_static_design_least_squares',
     'solve_refraction_static_least_squares',
+    'solve_refraction_multilayer_time_terms',
     'smooth_refraction_floating_datum_elevation',
     'summarize_refraction_static_design_matrix',
     'summarize_refraction_static_solve_result',
