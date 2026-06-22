@@ -140,9 +140,34 @@ def _public_result(
         raise RefractionStaticSolverError(
             'global bedrock slowness result requires solve_global mode'
         )
-    residual_stats = _residual_statistics(
+    trace_index = np.ascontiguousarray(input_model.sorted_trace_index, dtype=np.int64)
+    modeled_pick_time_s_sorted = _trace_indexed_to_sorted_float(
+        solve_result.modeled_pick_time_s_sorted,
+        trace_index,
+    )
+    residual_s_sorted = _trace_indexed_to_sorted_float(
         solve_result.residual_s_sorted,
-        used_mask=solve_result.used_observation_mask_sorted,
+        trace_index,
+    )
+    residual_ms_sorted = _trace_indexed_to_sorted_float(
+        solve_result.residual_ms_sorted,
+        trace_index,
+    )
+    used_observation_mask_sorted = _trace_indexed_to_sorted_bool(
+        solve_result.used_observation_mask_sorted,
+        trace_index,
+    )
+    rejected_observation_mask_sorted = _trace_indexed_to_sorted_bool(
+        solve_result.rejected_observation_mask_sorted,
+        trace_index,
+    )
+    rejected_iteration_sorted = _trace_indexed_to_sorted_int(
+        solve_result.rejected_iteration_sorted,
+        trace_index,
+    )
+    residual_stats = _residual_statistics(
+        residual_s_sorted,
+        used_mask=used_observation_mask_sorted,
     )
     qc = dict(solve_result.qc)
     qc['residual_statistics'] = dict(residual_stats)
@@ -159,14 +184,12 @@ def _public_result(
         node_half_intercept_time_s=solve_result.node_half_intercept_time_s,
         node_solution_status=solve_result.node_solution_status,
         node_observation_count=solve_result.node_observation_count,
-        modeled_pick_time_s_sorted=solve_result.modeled_pick_time_s_sorted,
-        residual_s_sorted=solve_result.residual_s_sorted,
-        residual_ms_sorted=solve_result.residual_ms_sorted,
-        used_observation_mask_sorted=solve_result.used_observation_mask_sorted,
-        rejected_observation_mask_sorted=(
-            solve_result.rejected_observation_mask_sorted
-        ),
-        rejected_iteration_sorted=solve_result.rejected_iteration_sorted,
+        modeled_pick_time_s_sorted=modeled_pick_time_s_sorted,
+        residual_s_sorted=residual_s_sorted,
+        residual_ms_sorted=residual_ms_sorted,
+        used_observation_mask_sorted=used_observation_mask_sorted,
+        rejected_observation_mask_sorted=rejected_observation_mask_sorted,
+        rejected_iteration_sorted=rejected_iteration_sorted,
         rms_residual_s=solve_result.rms_residual_s,
         rms_residual_ms=solve_result.rms_residual_ms,
         residual_mean_s=residual_stats['mean_s'],
@@ -212,6 +235,27 @@ def _residual_statistics(
         'mad_s': float(np.median(np.abs(values - median))),
         'max_abs_s': float(np.max(np.abs(values))),
     }
+
+
+def _trace_indexed_to_sorted_float(
+    values: np.ndarray,
+    trace_index: np.ndarray,
+) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(values, dtype=np.float64)[trace_index])
+
+
+def _trace_indexed_to_sorted_int(
+    values: np.ndarray,
+    trace_index: np.ndarray,
+) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(values, dtype=np.int64)[trace_index])
+
+
+def _trace_indexed_to_sorted_bool(
+    values: np.ndarray,
+    trace_index: np.ndarray,
+) -> np.ndarray:
+    return np.ascontiguousarray(np.asarray(values, dtype=bool)[trace_index])
 
 
 __all__ = [

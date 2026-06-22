@@ -170,6 +170,44 @@ def test_global_bedrock_facade_matches_solver_result() -> None:
     )
 
 
+def test_global_bedrock_trace_indexed_solver_arrays_return_sorted_rows() -> None:
+    input_model = replace(
+        _global_input_model(),
+        sorted_trace_index=np.asarray([2, 0, 5, 1, 3, 4], dtype=np.int64),
+    )
+
+    result = estimate_global_bedrock_slowness_from_input_model(
+        input_model=input_model,
+        model=_global_model(),
+        solver_options=_solver_options(),
+        include_debug_objects=True,
+    )
+
+    assert result.debug_solve_result is not None
+    np.testing.assert_array_equal(
+        np.flatnonzero(result.debug_solve_result.used_observation_mask_sorted),
+        [0, 1, 2, 3, 5],
+    )
+    np.testing.assert_array_equal(
+        result.used_observation_mask_sorted,
+        [True, True, True, True, True, False],
+    )
+    np.testing.assert_array_equal(
+        result.rejected_observation_mask_sorted,
+        [False, False, False, False, False, False],
+    )
+    np.testing.assert_allclose(
+        result.modeled_pick_time_s_sorted[:5],
+        input_model.pick_time_s_sorted[:5],
+        atol=1.0e-10,
+    )
+    assert np.isnan(result.modeled_pick_time_s_sorted[-1])
+    np.testing.assert_allclose(result.residual_s_sorted[:5], 0.0, atol=1.0e-10)
+    assert np.isnan(result.residual_s_sorted[-1])
+    np.testing.assert_array_equal(result.rejected_iteration_sorted, [-1] * 6)
+    assert result.residual_max_abs_s < 1.0e-10
+
+
 def test_global_bedrock_facade_omits_debug_objects_by_default() -> None:
     result = estimate_global_bedrock_slowness_from_input_model(
         input_model=_global_input_model(),
