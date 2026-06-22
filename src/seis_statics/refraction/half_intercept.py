@@ -128,6 +128,56 @@ class RefractionHalfInterceptResult:
     debug_solve_result: RefractionStaticSolveResult | None = None
 
 
+@dataclass(frozen=True)
+class _HalfInterceptSolution:
+    node_id: np.ndarray
+    node_half_intercept_time_s: np.ndarray
+    node_solution_status: np.ndarray
+    node_observation_count: np.ndarray
+
+    bedrock_velocity_mode: str
+    bedrock_velocity_m_s: float
+    bedrock_slowness_s_per_m: float
+    bedrock_velocity_status: str
+
+    cell_id: np.ndarray
+    cell_bedrock_slowness_s_per_m: np.ndarray
+    cell_bedrock_velocity_m_s: np.ndarray
+    cell_velocity_status: np.ndarray
+    cell_observation_count: np.ndarray
+    row_midpoint_cell_id: np.ndarray
+    row_midpoint_bedrock_slowness_s_per_m: np.ndarray
+    row_midpoint_bedrock_velocity_m_s: np.ndarray
+    row_midpoint_v2_m_s: np.ndarray
+    cell_v2_m_s: np.ndarray
+
+    modeled_pick_time_s_sorted: np.ndarray
+    residual_s_sorted: np.ndarray
+    residual_ms_sorted: np.ndarray
+    used_observation_mask_sorted: np.ndarray
+    rejected_observation_mask_sorted: np.ndarray
+    rejected_iteration_sorted: np.ndarray
+
+    rms_residual_s: float
+    rms_residual_ms: float
+
+    solver_success: bool
+    solver_status: int
+    solver_message: str
+    solver_cost: float
+    solver_optimality: float
+    solver_iterations: int
+
+    robust_enabled: bool
+    robust_stop_reason: RefractionStaticRobustStopReason
+    robust_iteration_summaries: tuple[RefractionStaticRobustIterationSummary, ...]
+    n_initial_used_observations: int
+    n_final_used_observations: int
+    n_rejected_observations: int
+
+    qc: dict[str, Any]
+
+
 def build_refraction_half_intercept_result(
     *,
     input_model: RefractionStaticInputModel,
@@ -141,6 +191,24 @@ def build_refraction_half_intercept_result(
         design=design,
         solve_result=solve_result,
     )
+    return _build_refraction_half_intercept_result_from_solution(
+        input_model=input_model,
+        solution=_solution_from_solve_result(solve_result),
+        include_debug_objects=include_debug_objects,
+        debug_design=design,
+        debug_solve_result=solve_result,
+    )
+
+
+def _build_refraction_half_intercept_result_from_solution(
+    *,
+    input_model: RefractionStaticInputModel,
+    solution: _HalfInterceptSolution,
+    include_debug_objects: bool,
+    debug_design: RefractionStaticDesignMatrix | None,
+    debug_solve_result: RefractionStaticSolveResult | None,
+) -> RefractionHalfInterceptResult:
+    solve_result = solution
     trace_index = np.ascontiguousarray(input_model.sorted_trace_index, dtype=np.int64)
     used_mask = _trace_indexed_to_sorted_bool(
         solve_result.used_observation_mask_sorted,
@@ -303,8 +371,8 @@ def build_refraction_half_intercept_result(
         n_final_used_observations=solve_result.n_final_used_observations,
         n_rejected_observations=solve_result.n_rejected_observations,
         qc=qc,
-        debug_design=design if include_debug_objects else None,
-        debug_solve_result=solve_result if include_debug_objects else None,
+        debug_design=debug_design if include_debug_objects else None,
+        debug_solve_result=debug_solve_result if include_debug_objects else None,
     )
 
 
@@ -314,17 +382,18 @@ def build_refraction_half_intercept_result_from_bedrock_result(
     bedrock_result: GlobalBedrockSlownessEstimateResult,
     include_debug_objects: bool = False,
 ) -> RefractionHalfInterceptResult:
-    """Build a half-intercept result from a bedrock facade debug solve result."""
-    solve_result = bedrock_result.debug_solve_result
-    if solve_result is None:
-        raise RefractionHalfInterceptError(
-            'bedrock_result.debug_solve_result is required'
-        )
-    return build_refraction_half_intercept_result(
+    """Build a half-intercept result from a public bedrock facade result."""
+    _validate_bedrock_result_inputs(
         input_model=input_model,
-        design=solve_result.design,
-        solve_result=solve_result,
+        bedrock_result=bedrock_result,
+    )
+    debug_solve_result = bedrock_result.debug_solve_result
+    return _build_refraction_half_intercept_result_from_solution(
+        input_model=input_model,
+        solution=_solution_from_bedrock_result(bedrock_result),
         include_debug_objects=include_debug_objects,
+        debug_design=None if debug_solve_result is None else debug_solve_result.design,
+        debug_solve_result=debug_solve_result,
     )
 
 
@@ -391,6 +460,149 @@ def build_refraction_half_intercept_design(
         resolved_first_layer=resolved_first_layer,
         include_diagnostics=include_diagnostics,
     )
+
+
+def _solution_from_solve_result(
+    solve_result: RefractionStaticSolveResult,
+) -> _HalfInterceptSolution:
+    return _HalfInterceptSolution(
+        node_id=solve_result.node_id,
+        node_half_intercept_time_s=solve_result.node_half_intercept_time_s,
+        node_solution_status=solve_result.node_solution_status,
+        node_observation_count=solve_result.node_observation_count,
+        bedrock_velocity_mode=solve_result.bedrock_velocity_mode,
+        bedrock_velocity_m_s=solve_result.bedrock_velocity_m_s,
+        bedrock_slowness_s_per_m=solve_result.bedrock_slowness_s_per_m,
+        bedrock_velocity_status=solve_result.bedrock_velocity_status,
+        cell_id=solve_result.cell_id,
+        cell_bedrock_slowness_s_per_m=solve_result.cell_bedrock_slowness_s_per_m,
+        cell_bedrock_velocity_m_s=solve_result.cell_bedrock_velocity_m_s,
+        cell_velocity_status=solve_result.cell_velocity_status,
+        cell_observation_count=solve_result.cell_observation_count,
+        row_midpoint_cell_id=solve_result.row_midpoint_cell_id,
+        row_midpoint_bedrock_slowness_s_per_m=(
+            solve_result.row_midpoint_bedrock_slowness_s_per_m
+        ),
+        row_midpoint_bedrock_velocity_m_s=(
+            solve_result.row_midpoint_bedrock_velocity_m_s
+        ),
+        row_midpoint_v2_m_s=solve_result.row_midpoint_v2_m_s,
+        cell_v2_m_s=solve_result.cell_v2_m_s,
+        modeled_pick_time_s_sorted=solve_result.modeled_pick_time_s_sorted,
+        residual_s_sorted=solve_result.residual_s_sorted,
+        residual_ms_sorted=solve_result.residual_ms_sorted,
+        used_observation_mask_sorted=solve_result.used_observation_mask_sorted,
+        rejected_observation_mask_sorted=solve_result.rejected_observation_mask_sorted,
+        rejected_iteration_sorted=solve_result.rejected_iteration_sorted,
+        rms_residual_s=solve_result.rms_residual_s,
+        rms_residual_ms=solve_result.rms_residual_ms,
+        solver_success=solve_result.solver_success,
+        solver_status=solve_result.solver_status,
+        solver_message=solve_result.solver_message,
+        solver_cost=solve_result.solver_cost,
+        solver_optimality=solve_result.solver_optimality,
+        solver_iterations=solve_result.solver_iterations,
+        robust_enabled=solve_result.robust_enabled,
+        robust_stop_reason=solve_result.robust_stop_reason,
+        robust_iteration_summaries=solve_result.robust_iteration_summaries,
+        n_initial_used_observations=solve_result.n_initial_used_observations,
+        n_final_used_observations=solve_result.n_final_used_observations,
+        n_rejected_observations=solve_result.n_rejected_observations,
+        qc=solve_result.qc,
+    )
+
+
+def _solution_from_bedrock_result(
+    bedrock_result: GlobalBedrockSlownessEstimateResult,
+) -> _HalfInterceptSolution:
+    empty_int = np.empty(0, dtype=np.int64)
+    empty_float = np.empty(0, dtype=np.float64)
+    empty_status = np.empty(0, dtype='<U32')
+    return _HalfInterceptSolution(
+        node_id=bedrock_result.node_id,
+        node_half_intercept_time_s=bedrock_result.node_half_intercept_time_s,
+        node_solution_status=bedrock_result.node_solution_status,
+        node_observation_count=bedrock_result.node_observation_count,
+        bedrock_velocity_mode=bedrock_result.bedrock_velocity_mode,
+        bedrock_velocity_m_s=bedrock_result.bedrock_velocity_m_s,
+        bedrock_slowness_s_per_m=bedrock_result.bedrock_slowness_s_per_m,
+        bedrock_velocity_status=bedrock_result.bedrock_velocity_status,
+        cell_id=empty_int,
+        cell_bedrock_slowness_s_per_m=empty_float,
+        cell_bedrock_velocity_m_s=empty_float,
+        cell_velocity_status=empty_status,
+        cell_observation_count=empty_int,
+        row_midpoint_cell_id=empty_int,
+        row_midpoint_bedrock_slowness_s_per_m=empty_float,
+        row_midpoint_bedrock_velocity_m_s=empty_float,
+        row_midpoint_v2_m_s=empty_float,
+        cell_v2_m_s=empty_float,
+        modeled_pick_time_s_sorted=bedrock_result.modeled_pick_time_s_sorted,
+        residual_s_sorted=bedrock_result.residual_s_sorted,
+        residual_ms_sorted=bedrock_result.residual_ms_sorted,
+        used_observation_mask_sorted=bedrock_result.used_observation_mask_sorted,
+        rejected_observation_mask_sorted=bedrock_result.rejected_observation_mask_sorted,
+        rejected_iteration_sorted=bedrock_result.rejected_iteration_sorted,
+        rms_residual_s=bedrock_result.rms_residual_s,
+        rms_residual_ms=bedrock_result.rms_residual_ms,
+        solver_success=bedrock_result.solver_success,
+        solver_status=bedrock_result.solver_status,
+        solver_message=bedrock_result.solver_message,
+        solver_cost=bedrock_result.solver_cost,
+        solver_optimality=bedrock_result.solver_optimality,
+        solver_iterations=bedrock_result.solver_iterations,
+        robust_enabled=bedrock_result.robust_enabled,
+        robust_stop_reason=bedrock_result.robust_stop_reason,
+        robust_iteration_summaries=bedrock_result.robust_iteration_summaries,
+        n_initial_used_observations=bedrock_result.n_initial_used_observations,
+        n_final_used_observations=bedrock_result.n_final_used_observations,
+        n_rejected_observations=bedrock_result.n_rejected_observations,
+        qc=bedrock_result.qc,
+    )
+
+
+def _validate_bedrock_result_inputs(
+    *,
+    input_model: RefractionStaticInputModel,
+    bedrock_result: GlobalBedrockSlownessEstimateResult,
+) -> None:
+    if not isinstance(input_model, RefractionStaticInputModel):
+        raise RefractionHalfInterceptError(
+            'input_model must be a RefractionStaticInputModel instance'
+        )
+    if not isinstance(bedrock_result, GlobalBedrockSlownessEstimateResult):
+        raise RefractionHalfInterceptError(
+            'bedrock_result must be a GlobalBedrockSlownessEstimateResult instance'
+        )
+    if int(input_model.n_traces) != int(bedrock_result.n_traces):
+        raise RefractionHalfInterceptError(
+            'input_model.n_traces must match bedrock_result.n_traces'
+        )
+    if bedrock_result.bedrock_velocity_mode != 'solve_global':
+        raise RefractionHalfInterceptError(
+            'bedrock_result.bedrock_velocity_mode must be solve_global'
+        )
+    expected_shape = (int(input_model.sorted_trace_index.shape[0]),)
+    for name in (
+        'pick_time_s_sorted',
+        'valid_pick_mask_sorted',
+        'source_endpoint_key_sorted',
+        'receiver_endpoint_key_sorted',
+        'source_node_id_sorted',
+        'receiver_node_id_sorted',
+    ):
+        value = np.asarray(getattr(input_model, name))
+        if value.shape != expected_shape:
+            raise RefractionHalfInterceptError(f'input_model.{name} shape mismatch')
+    trace_index = np.asarray(input_model.sorted_trace_index, dtype=np.int64)
+    if trace_index.size and (
+        np.min(trace_index) < 0
+        or np.max(trace_index) >= bedrock_result.modeled_pick_time_s_sorted.shape[0]
+    ):
+        raise RefractionHalfInterceptError(
+            'input_model.sorted_trace_index values are outside bedrock result trace range'
+        )
+    _validate_global_bedrock_consistency(_solution_from_bedrock_result(bedrock_result))
 
 
 def _validate_result_inputs(
@@ -669,12 +881,22 @@ def _trace_half_intercept_status(
     receiver_status: np.ndarray,
 ) -> np.ndarray:
     status = np.full(source_t1.shape, 'solved', dtype='<U32')
+    source = np.asarray(source_status).astype(str, copy=False)
+    receiver = np.asarray(receiver_status).astype(str, copy=False)
+    missing_node = (source == 'missing_node') | (receiver == 'missing_node')
+    low_fold = (source == 'low_fold') | (receiver == 'low_fold')
+    same = source == receiver
+    status[same] = source[same]
+    mismatch = ~same
+    source_solved = source == 'solved'
+    receiver_solved = receiver == 'solved'
+    status[mismatch & source_solved] = receiver[mismatch & source_solved]
+    status[mismatch & receiver_solved] = source[mismatch & receiver_solved]
+    status[mismatch & ~source_solved & ~receiver_solved] = 'mixed'
+    status[low_fold] = 'low_fold'
+    status[missing_node] = 'missing_node'
     invalid_value = ~np.isfinite(source_t1) | ~np.isfinite(receiver_t1)
-    status[invalid_value] = 'invalid_half_intercept'
-    mismatch = source_status != receiver_status
-    status[mismatch & ~invalid_value] = 'mixed'
-    same = (source_status == receiver_status) & ~invalid_value
-    status[same] = source_status[same]
+    status[invalid_value & (status == 'solved')] = 'invalid_half_intercept'
     return np.ascontiguousarray(status)
 
 

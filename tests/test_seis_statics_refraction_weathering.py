@@ -305,3 +305,13 @@ def test_weathering_model_overlays_cell_local_v2_status() -> None:
     assert 'low_fold_v2_cell' in set(model.trace_weathering_status_sorted.tolist())
     assert model.source_endpoint.weathering_status[1] == 'inactive_v2_cell'
     assert 'mixed' in set(model.trace_weathering_status_sorted.tolist())
+    design_qc = half_intercept.qc['design_matrix']
+    for key in (
+        'min_observations_per_cell',
+        'n_low_fold_cells',
+        'n_observations_rejected_by_low_fold_cell',
+        'low_fold_cell_rejection_reason',
+        'low_fold_cell_id',
+        'cell_observation_count',
+    ):
+        assert model.qc[key] == design_qc[key]

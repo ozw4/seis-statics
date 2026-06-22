@@ -7,7 +7,6 @@ import pytest
 
 from seis_statics.refraction import (
     RefractionEndpointTable,
-    RefractionHalfInterceptError,
     RefractionStaticInputModel,
     RefractionStaticModelOptions,
     RefractionStaticRobustOptions,
@@ -252,13 +251,12 @@ def test_half_intercept_trace_indexed_solver_arrays_return_sorted_rows() -> None
     )
 
 
-def test_half_intercept_bedrock_convenience_uses_debug_solve_result() -> None:
+def test_half_intercept_bedrock_convenience_uses_public_bedrock_result() -> None:
     input_model = _global_input_model()
     bedrock_result = estimate_global_bedrock_slowness_from_input_model(
         input_model=input_model,
         model=_global_model(),
         solver_options=_solver_options(),
-        include_debug_objects=True,
     )
 
     result = build_refraction_half_intercept_result_from_bedrock_result(
@@ -275,18 +273,22 @@ def test_half_intercept_bedrock_convenience_uses_debug_solve_result() -> None:
     )
 
 
-def test_half_intercept_bedrock_convenience_requires_debug_solve_result() -> None:
+def test_half_intercept_bedrock_convenience_can_include_debug_objects() -> None:
     bedrock_result = estimate_global_bedrock_slowness_from_input_model(
         input_model=_global_input_model(),
         model=_global_model(),
         solver_options=_solver_options(),
+        include_debug_objects=True,
     )
 
-    with pytest.raises(RefractionHalfInterceptError, match='debug_solve_result'):
-        build_refraction_half_intercept_result_from_bedrock_result(
-            input_model=_global_input_model(),
-            bedrock_result=bedrock_result,
-        )
+    result = build_refraction_half_intercept_result_from_bedrock_result(
+        input_model=_global_input_model(),
+        bedrock_result=bedrock_result,
+        include_debug_objects=True,
+    )
+
+    assert result.debug_solve_result is bedrock_result.debug_solve_result
+    assert result.debug_design is bedrock_result.debug_solve_result.design
 
 
 def test_half_intercept_facade_preserves_bedrock_velocity_validation() -> None:
@@ -412,3 +414,4 @@ def test_half_intercept_low_fold_node_status_is_preserved() -> None:
     assert result.node_solution_status.tolist()[2] == 'low_fold'
     assert np.isnan(result.node_half_intercept_time_s[2])
     assert result.source_endpoint.solution_status.tolist()[-1] == 'low_fold'
+    assert result.trace_half_intercept_status_sorted.tolist()[2] == 'low_fold'

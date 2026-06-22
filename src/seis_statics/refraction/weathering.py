@@ -746,7 +746,7 @@ def _build_weathering_qc(
     trace_status: np.ndarray,
     max_weathering_thickness_m: float | None,
 ) -> dict[str, Any]:
-    return {
+    qc = {
         'file_id': half_intercept_result.file_id,
         'n_traces': int(half_intercept_result.n_traces),
         'bedrock_velocity_mode': half_intercept_result.bedrock_velocity_mode,
@@ -761,6 +761,25 @@ def _build_weathering_qc(
         'node_weathering_status_counts': _status_counts(node_status),
         'trace_weathering_status_counts': _status_counts(trace_status),
     }
+    _copy_cell_qc(qc, half_intercept_result.qc)
+    design_qc = half_intercept_result.qc.get('design_matrix')
+    if isinstance(design_qc, dict):
+        _copy_cell_qc(qc, design_qc)
+    return qc
+
+
+def _copy_cell_qc(payload: dict[str, Any], upstream: dict[str, Any]) -> None:
+    for key in (
+        'min_observations_per_cell',
+        'n_low_fold_cells',
+        'n_observations_rejected_by_low_fold_cell',
+        'low_fold_cell_rejection_reason',
+        'low_fold_cell_id',
+        'cell_observation_count',
+        'layers',
+    ):
+        if key in upstream:
+            payload[key] = upstream[key]
 
 
 def _overlay_non_ok_status(
