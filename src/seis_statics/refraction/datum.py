@@ -85,6 +85,7 @@ class RefractionDatumEndpointResult:
     node_id: np.ndarray
     surface_elevation_m: np.ndarray
     refractor_elevation_m: np.ndarray
+    replacement_velocity_m_s: np.ndarray
     floating_datum_elevation_m: np.ndarray
     flat_datum_elevation_m: np.ndarray
     weathering_replacement_shift_s: np.ndarray
@@ -101,7 +102,7 @@ class RefractionDatumStaticsResult:
     """Trace-order refraction datum static composition result."""
 
     mode: RefractionStaticDatumMode
-    replacement_velocity_m_s: float
+    replacement_velocity_m_s: float | None
     source_endpoint_datum: RefractionDatumEndpointResult
     receiver_endpoint_datum: RefractionDatumEndpointResult
     source_endpoint_key_sorted: np.ndarray
@@ -142,18 +143,20 @@ def compute_refraction_datum_elevation_shift_s(
     *,
     elevation_m: np.ndarray,
     datum_elevation_m: np.ndarray | float,
-    replacement_velocity_m_s: float,
+    replacement_velocity_m_s: np.ndarray | float,
 ) -> np.ndarray:
-    """Compute datum elevation shifts for a 1-D endpoint array."""
+    """Compute shifts with a scalar or endpoint-shaped replacement velocity."""
     elevation = _coerce_1d_float(elevation_m, name='elevation_m')
     datum = _coerce_datum_elevation(
         datum_elevation_m,
         name='datum_elevation_m',
         expected_shape=elevation.shape,
     )
-    velocity = _coerce_positive_finite_float(
+    velocity = _coerce_replacement_velocity(
         replacement_velocity_m_s,
         name='replacement_velocity_m_s',
+        expected_shape=elevation.shape,
+        require_all_finite=True,
     )
     out = (datum - elevation) / velocity
     return np.ascontiguousarray(out, dtype=np.float64)
@@ -204,23 +207,25 @@ def build_refraction_endpoint_datum_statics(
     weathering_replacement_shift_s: np.ndarray,
     weathering_replacement_status: np.ndarray,
     mode: RefractionStaticDatumMode,
-    replacement_velocity_m_s: float,
+    replacement_velocity_m_s: np.ndarray | float,
     floating_datum_elevation_m: np.ndarray | float | None = None,
     flat_datum_elevation_m: np.ndarray | float | None = None,
     allow_flat_datum_above_topography: bool = True,
     allow_flat_datum_below_refractor: bool = False,
     max_abs_datum_shift_ms: float | None = None,
 ) -> RefractionDatumEndpointResult:
-    """Compose replacement, floating datum, and flat datum shifts per endpoint."""
+    """Compose endpoint shifts with scalar or endpoint-shaped replacement velocity."""
     kind = _coerce_endpoint_kind(endpoint_kind)
     datum_mode = _coerce_mode(mode)
-    velocity = _coerce_positive_finite_float(
-        replacement_velocity_m_s,
-        name='replacement_velocity_m_s',
-    )
     max_abs_shift_s = _optional_max_abs_shift_s(max_abs_datum_shift_ms)
     keys = _coerce_1d_string(endpoint_key, name=f'{kind}_endpoint_key')
     endpoint_count = int(keys.shape[0])
+    velocity = _coerce_replacement_velocity(
+        replacement_velocity_m_s,
+        name=f'{kind}_replacement_velocity_m_s',
+        expected_shape=(endpoint_count,),
+        require_all_finite=False,
+    )
     ids = _coerce_optional_endpoint_ids(
         endpoint_id,
         endpoint_count=endpoint_count,
@@ -275,6 +280,7 @@ def build_refraction_endpoint_datum_statics(
             surface_elevation_m=float(surface[index]),
             refractor_elevation_m=float(refractor[index]),
             replacement_shift_s=float(replacement[index]),
+            replacement_velocity_m_s=float(velocity[index]),
             mode=datum_mode,
             floating_datum_elevation_m=float(floating[index]),
             flat_datum_elevation_m=float(flat[index]),
@@ -288,7 +294,7 @@ def build_refraction_endpoint_datum_statics(
             floating_shift[index] = compute_refraction_datum_elevation_shift_scalar_s(
                 elevation_m=float(surface[index]),
                 datum_elevation_m=float(floating[index]),
-                replacement_velocity_m_s=velocity,
+                replacement_velocity_m_s=float(velocity[index]),
             )
         if datum_mode == 'flat_only':
             flat_elevation_reference = float(surface[index])
@@ -298,7 +304,7 @@ def build_refraction_endpoint_datum_statics(
             flat_shift[index] = compute_refraction_datum_elevation_shift_scalar_s(
                 elevation_m=flat_elevation_reference,
                 datum_elevation_m=float(flat[index]),
-                replacement_velocity_m_s=velocity,
+                replacement_velocity_m_s=float(velocity[index]),
             )
 
         endpoint_total = (
@@ -335,6 +341,7 @@ def build_refraction_endpoint_datum_statics(
         node_id=nodes,
         surface_elevation_m=np.ascontiguousarray(surface, dtype=np.float64),
         refractor_elevation_m=np.ascontiguousarray(refractor, dtype=np.float64),
+        replacement_velocity_m_s=np.ascontiguousarray(velocity, dtype=np.float64),
         floating_datum_elevation_m=np.ascontiguousarray(floating, dtype=np.float64),
         flat_datum_elevation_m=np.ascontiguousarray(flat, dtype=np.float64),
         weathering_replacement_shift_s=np.ascontiguousarray(
@@ -372,7 +379,9 @@ def build_refraction_datum_statics(
     source_endpoint_key_sorted: np.ndarray,
     receiver_endpoint_key_sorted: np.ndarray,
     mode: RefractionStaticDatumMode,
-    replacement_velocity_m_s: float,
+    replacement_velocity_m_s: np.ndarray | float | None = None,
+    source_replacement_velocity_m_s: np.ndarray | float | None = None,
+    receiver_replacement_velocity_m_s: np.ndarray | float | None = None,
     floating_datum: ResolvedFloatingDatum | None = None,
     source_floating_datum_elevation_m: np.ndarray | float | None = None,
     receiver_floating_datum_elevation_m: np.ndarray | float | None = None,
@@ -386,7 +395,7 @@ def build_refraction_datum_statics(
     apply_field_correction_to_trace_shift: bool = False,
     invalid_field_component_policy: RefractionFieldInvalidComponentPolicy = 'fail',
 ) -> RefractionDatumStaticsResult:
-    """Build sorted endpoint/trace final shifts from resolved datum arrays."""
+    """Build endpoint/trace shifts from scalar or source/receiver replacement velocities."""
     datum_mode = _coerce_mode(mode)
     source_floating, receiver_floating = _floating_inputs(
         floating_datum=floating_datum,
@@ -403,9 +412,10 @@ def build_refraction_datum_statics(
         if receiver_flat_datum_elevation_m is None
         else receiver_flat_datum_elevation_m
     )
-    velocity = _coerce_positive_finite_float(
-        replacement_velocity_m_s,
-        name='replacement_velocity_m_s',
+    source_velocity, receiver_velocity = _replacement_velocity_inputs(
+        replacement_velocity_m_s=replacement_velocity_m_s,
+        source_replacement_velocity_m_s=source_replacement_velocity_m_s,
+        receiver_replacement_velocity_m_s=receiver_replacement_velocity_m_s,
     )
 
     source = build_refraction_endpoint_datum_statics(
@@ -418,7 +428,7 @@ def build_refraction_datum_statics(
         weathering_replacement_shift_s=source_weathering_replacement_shift_s,
         weathering_replacement_status=source_weathering_replacement_status,
         mode=datum_mode,
-        replacement_velocity_m_s=velocity,
+        replacement_velocity_m_s=source_velocity,
         floating_datum_elevation_m=source_floating,
         flat_datum_elevation_m=source_flat,
         allow_flat_datum_above_topography=allow_flat_datum_above_topography,
@@ -435,7 +445,7 @@ def build_refraction_datum_statics(
         weathering_replacement_shift_s=receiver_weathering_replacement_shift_s,
         weathering_replacement_status=receiver_weathering_replacement_status,
         mode=datum_mode,
-        replacement_velocity_m_s=velocity,
+        replacement_velocity_m_s=receiver_velocity,
         floating_datum_elevation_m=receiver_floating,
         flat_datum_elevation_m=receiver_flat,
         allow_flat_datum_above_topography=allow_flat_datum_above_topography,
@@ -518,9 +528,13 @@ def build_refraction_datum_statics(
         final_valid = field_result.final_trace_static_valid_mask_sorted
         applied_field = field_result.applied_field_shift_s_sorted
 
+    scalar_velocity = _common_scalar_replacement_velocity(
+        source.replacement_velocity_m_s,
+        receiver.replacement_velocity_m_s,
+    )
     qc = _trace_qc(
         mode=datum_mode,
-        replacement_velocity_m_s=velocity,
+        replacement_velocity_m_s=scalar_velocity,
         source=source,
         receiver=receiver,
         trace_shift_s=trace_shift,
@@ -536,7 +550,7 @@ def build_refraction_datum_statics(
     )
     return RefractionDatumStaticsResult(
         mode=datum_mode,
-        replacement_velocity_m_s=float(velocity),
+        replacement_velocity_m_s=scalar_velocity,
         source_endpoint_datum=source,
         receiver_endpoint_datum=receiver,
         source_endpoint_key_sorted=np.ascontiguousarray(
@@ -588,6 +602,7 @@ def _endpoint_status(
     surface_elevation_m: float,
     refractor_elevation_m: float,
     replacement_shift_s: float,
+    replacement_velocity_m_s: float,
     mode: RefractionStaticDatumMode,
     floating_datum_elevation_m: float,
     flat_datum_elevation_m: float,
@@ -603,6 +618,8 @@ def _endpoint_status(
         return 'invalid_refractor_elevation'
     if not np.isfinite(replacement_shift_s):
         return 'invalid_datum_shift'
+    if (not np.isfinite(replacement_velocity_m_s)) or replacement_velocity_m_s <= 0.0:
+        return 'invalid_velocity'
     if mode in {'floating_only', 'floating_and_flat'}:
         if not np.isfinite(floating_datum_elevation_m):
             return 'invalid_floating_datum_elevation'
@@ -661,6 +678,73 @@ def _floating_inputs(
             'provide either floating_datum or source/receiver floating datum arrays'
         )
     return floating_datum.source_elevation_m, floating_datum.receiver_elevation_m
+
+
+def _replacement_velocity_inputs(
+    *,
+    replacement_velocity_m_s: np.ndarray | float | None,
+    source_replacement_velocity_m_s: np.ndarray | float | None,
+    receiver_replacement_velocity_m_s: np.ndarray | float | None,
+) -> tuple[np.ndarray | float, np.ndarray | float]:
+    has_shared = replacement_velocity_m_s is not None
+    has_endpoint = (
+        source_replacement_velocity_m_s is not None
+        or receiver_replacement_velocity_m_s is not None
+    )
+    if has_shared and has_endpoint:
+        raise RefractionDatumError(
+            'provide either replacement_velocity_m_s or source/receiver replacement velocities'
+        )
+    if has_shared:
+        return replacement_velocity_m_s, replacement_velocity_m_s
+    if (
+        source_replacement_velocity_m_s is None
+        or receiver_replacement_velocity_m_s is None
+    ):
+        raise RefractionDatumError('replacement_velocity_m_s is required')
+    return source_replacement_velocity_m_s, receiver_replacement_velocity_m_s
+
+
+def _coerce_replacement_velocity(
+    value: np.ndarray | float,
+    *,
+    name: str,
+    expected_shape: tuple[int, ...],
+    require_all_finite: bool,
+) -> np.ndarray:
+    arr = np.asarray(value)
+    if arr.ndim == 0:
+        scalar = _coerce_positive_finite_float(
+            value,
+            name=name,
+            error_type=RefractionDatumError,
+        )
+        return np.full(expected_shape, scalar, dtype=np.float64)
+    velocity = _coerce_1d_float(value, name=name, expected_shape=expected_shape)
+    invalid = (~np.isfinite(velocity)) | (velocity <= 0.0)
+    if require_all_finite and np.any(invalid):
+        raise RefractionDatumError(f'{name} must contain only positive finite values')
+    return np.ascontiguousarray(velocity, dtype=np.float64)
+
+
+def _common_scalar_replacement_velocity(
+    source_velocity_m_s: np.ndarray,
+    receiver_velocity_m_s: np.ndarray,
+) -> float | None:
+    values = np.concatenate(
+        (
+            np.asarray(source_velocity_m_s, dtype=np.float64),
+            np.asarray(receiver_velocity_m_s, dtype=np.float64),
+        )
+    )
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    first = float(finite[0])
+    tolerance = max(1.0e-9, abs(first) * 1.0e-9)
+    if np.max(finite) - np.min(finite) <= tolerance:
+        return first
+    return None
 
 
 def _resolved_datum(
@@ -729,7 +813,7 @@ def _endpoint_qc(
     *,
     endpoint_kind: str,
     mode: RefractionStaticDatumMode,
-    replacement_velocity_m_s: float,
+    replacement_velocity_m_s: np.ndarray,
     surface_elevation_m: np.ndarray,
     refractor_elevation_m: np.ndarray,
     replacement_shift_s: np.ndarray,
@@ -748,7 +832,11 @@ def _endpoint_qc(
             'total_refraction_shift_s = weathering_replacement_shift_s + '
             'floating_datum_shift_s + flat_datum_shift_s'
         ),
-        'replacement_velocity_m_s': float(replacement_velocity_m_s),
+        'replacement_velocity_m_s': _common_scalar_replacement_velocity(
+            replacement_velocity_m_s,
+            replacement_velocity_m_s,
+        ),
+        'replacement_velocity_summary_m_s': _shift_summary(replacement_velocity_m_s),
         'max_abs_datum_shift_ms': (
             None if max_abs_datum_shift_ms is None else float(max_abs_datum_shift_ms)
         ),
@@ -767,7 +855,7 @@ def _endpoint_qc(
 def _trace_qc(
     *,
     mode: RefractionStaticDatumMode,
-    replacement_velocity_m_s: float,
+    replacement_velocity_m_s: float | None,
     source: RefractionDatumEndpointResult,
     receiver: RefractionDatumEndpointResult,
     trace_shift_s: np.ndarray,
@@ -792,7 +880,13 @@ def _trace_qc(
         'final_trace_shift_formula': _final_trace_formula(
             apply_field=field_composition_enabled and apply_field_correction_to_trace_shift
         ),
-        'replacement_velocity_m_s': float(replacement_velocity_m_s),
+        'replacement_velocity_m_s': replacement_velocity_m_s,
+        'source_replacement_velocity_summary_m_s': _shift_summary(
+            source.replacement_velocity_m_s
+        ),
+        'receiver_replacement_velocity_summary_m_s': _shift_summary(
+            receiver.replacement_velocity_m_s
+        ),
         'max_abs_datum_shift_ms': (
             None if max_abs_datum_shift_ms is None else float(max_abs_datum_shift_ms)
         ),

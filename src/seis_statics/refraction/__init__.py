@@ -239,6 +239,16 @@ _MULTILAYER_SOLVER_EXPORTS = frozenset(
         'solve_refraction_multilayer_time_terms',
     }
 )
+_MULTILAYER_CONVERSION_EXPORTS = frozenset(
+    {
+        'RefractionMultilayerConversionError',
+        'RefractionMultilayerConversionResult',
+        'RefractionMultilayerDatumStaticsResult',
+        'RefractionMultilayerEndpointConversion',
+        'build_refraction_multilayer_conversion',
+        'compute_refraction_multilayer_datum_statics_from_input_model',
+    }
+)
 
 
 def __getattr__(name: str) -> object:
@@ -290,6 +300,12 @@ def __getattr__(name: str) -> object:
         value = getattr(multilayer_solver, name)
         globals()[name] = value
         return value
+    if name in _MULTILAYER_CONVERSION_EXPORTS:
+        from seis_statics.refraction import multilayer_conversion
+
+        value = getattr(multilayer_conversion, name)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
 
 
@@ -338,6 +354,10 @@ __all__ = [
     'RefractionLayerObservationMasks',
     'RefractionLayerVelocityMode',
     'RefractionManualStaticResult',
+    'RefractionMultilayerConversionError',
+    'RefractionMultilayerConversionResult',
+    'RefractionMultilayerDatumStaticsResult',
+    'RefractionMultilayerEndpointConversion',
     'RefractionMultilayerTimeTermLayerResult',
     'RefractionMultilayerTimeTermSolveResult',
     'RefractionMultilayerTimeTermSolverError',
@@ -400,6 +420,7 @@ __all__ = [
     'assign_observation_midpoint_cells',
     'assign_points_to_refraction_cells',
     'build_refraction_layer_observation_masks',
+    'build_refraction_multilayer_conversion',
     'build_refraction_cell_grid',
     'build_refraction_datum_statics',
     'build_refraction_design_matrix_node_diagnostics',
@@ -428,6 +449,7 @@ __all__ = [
     'compute_t1lsst_3layer_weathering_correction',
     'compute_refraction_datum_elevation_shift_s',
     'compute_refraction_datum_elevation_shift_scalar_s',
+    'compute_refraction_multilayer_datum_statics_from_input_model',
     'compute_weathering_thickness_from_half_intercept_time',
     'compute_weathering_thickness_from_half_intercept_time_with_status',
     'compute_weathering_thickness_scalar_from_half_intercept_time',

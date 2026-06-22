@@ -127,6 +127,34 @@ def test_refraction_datum_shift_scalar_and_array_api() -> None:
     )
 
 
+def test_refraction_datum_uses_endpoint_replacement_velocity_arrays() -> None:
+    result = build_refraction_datum_statics(
+        **{
+            **_base_kwargs(),
+            'replacement_velocity_m_s': None,
+        },
+        mode='flat_only',
+        flat_datum_elevation_m=80.0,
+        source_replacement_velocity_m_s=_values([1000.0, 2000.0]),
+        receiver_replacement_velocity_m_s=_values([2500.0, 4000.0]),
+    )
+
+    np.testing.assert_allclose(
+        result.source_endpoint_datum.flat_datum_shift_s,
+        [-0.020, -0.005],
+    )
+    np.testing.assert_allclose(
+        result.receiver_endpoint_datum.flat_datum_shift_s,
+        [-0.006, -0.00125],
+    )
+    np.testing.assert_allclose(
+        result.refraction_trace_shift_s_sorted,
+        [-0.042, -0.01825],
+    )
+    assert result.replacement_velocity_m_s is None
+    np.testing.assert_array_equal(result.trace_static_status_sorted, ['ok', 'ok'])
+
+
 def test_refraction_datum_status_nan_checks_and_priority() -> None:
     result = build_refraction_datum_statics(
         **{
