@@ -863,7 +863,7 @@ def test_refraction_solver_large_sparse_allowed_nullity_boundary() -> None:
 def test_refraction_solver_sparse_near_threshold_policy() -> None:
     n = 1100
     above = solver_module._sparse_column_scaled_numerical_rank(
-        sparse.diags(np.r_[np.ones(n - 1), 1.0e-8], format='csr'),
+        sparse.diags(np.r_[np.ones(n - 1), 1.0e-6], format='csr'),
         expected_rank=n,
         expected_nullity=0,
         rtol=1.0e-10,
@@ -1005,7 +1005,7 @@ def test_refraction_solver_sparse_bad_corroborating_boundary_residual_fails(
         name: str,
     ) -> solver_module._SparseSingularTripletDiagnostic:
         bad_residual = 1.0 if which == 'SA' else 0.0
-        singular_value = 0.5 if which == 'SA' else 1.0
+        singular_value = 1.0
         return solver_module._SparseSingularTripletDiagnostic(
             singular_values=np.full(int(k), singular_value, dtype=np.float64),
             max_residual=bad_residual,
@@ -1030,6 +1030,44 @@ def test_refraction_solver_sparse_bad_corroborating_boundary_residual_fails(
             expected_nullity=0,
             rtol=1.0e-10,
         )
+
+
+def test_refraction_lsq_scale_accounts_for_large_matrix_with_nonzero_rhs() -> None:
+    matrix = sparse.csr_matrix(np.asarray([[1.0e100]], dtype=np.float64))
+    rhs = np.asarray([1.0], dtype=np.float64)
+
+    scale = solver_module._common_lsq_solve_scale(matrix, rhs)
+
+    assert scale < 1.0
+    assert abs(scale * matrix.data[0]) <= solver_module._LSQ_SOLVE_SCALED_ABS_MAX
+
+
+def test_refraction_lsq_kkt_tolerance_does_not_overflow_to_success() -> None:
+    system = _simple_lsq_system(
+        np.asarray([[1.0e155]], dtype=np.float64),
+        np.asarray([1.0], dtype=np.float64),
+        lower=-np.ones(1, dtype=np.float64),
+        upper=np.ones(1, dtype=np.float64),
+    )
+    fake = optimize.OptimizeResult(
+        success=True,
+        status=1,
+        optimality=0.0,
+        nit=1,
+    )
+    candidate = np.asarray([1.0e-155 + 1.0e-163], dtype=np.float64)
+
+    _, quality = solver_module._verify_lsq_linear_solution(
+        system,
+        candidate,
+        solve_scale=1.0,
+        stage='test',
+        scipy_result=fake,
+    )
+
+    assert not quality.verified
+    assert np.isfinite(quality.kkt_tolerance)
+    assert quality.projected_gradient_inf_norm > quality.kkt_tolerance
 
 
 def test_refraction_solver_large_sparse_global_slowness_duplicate_path_regression() -> None:

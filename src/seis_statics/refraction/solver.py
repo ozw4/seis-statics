@@ -1344,35 +1344,10 @@ def _sparse_column_scaled_numerical_rank(
                         'is too close to the rank threshold to certify'
                     )
                 if critical > threshold:
-                    certification_residual = boundary_triplets.max_residual
-                    if allowed_small_count > 0:
-                        certification_residual = max(
-                            certification_residual,
-                            float(
-                                np.max(
-                                    _sparse_triplet_residuals(
-                                        corroborating_triplets,
-                                    )[:allowed_small_count]
-                                )
-                            ),
-                        )
-                    boundary_comparison_tolerance = float(
-                        1.0e2
-                        * np.finfo(np.float64).eps
-                        * max(1.0, largest)
-                        * max(1, max(map(int, scaled_matrix.shape)))
+                    certification_residual = max(
+                        boundary_triplets.max_residual,
+                        corroborating_triplets.max_residual,
                     )
-                    if (
-                        corroborating_critical
-                        < boundary_critical - boundary_comparison_tolerance
-                    ):
-                        certification_residual = max(
-                            certification_residual,
-                            _sparse_triplet_residual_at(
-                                corroborating_triplets,
-                                allowed_small_count,
-                            ),
-                        )
                     max_residual = max(max_residual, certification_residual)
                     if certification_residual > residual_tolerance:
                         raise RefractionStaticSolverError(
@@ -1427,26 +1402,6 @@ class _SparseSingularTripletDiagnostic:
     singular_values: np.ndarray
     max_residual: float
     residuals: np.ndarray | None = None
-
-
-def _sparse_triplet_residuals(
-    diagnostic: _SparseSingularTripletDiagnostic,
-) -> np.ndarray:
-    if diagnostic.residuals is None:
-        return np.full(
-            diagnostic.singular_values.shape,
-            float(diagnostic.max_residual),
-            dtype=np.float64,
-        )
-    return np.asarray(diagnostic.residuals, dtype=np.float64)
-
-
-def _sparse_triplet_residual_at(
-    diagnostic: _SparseSingularTripletDiagnostic,
-    index: int,
-) -> float:
-    residuals = _sparse_triplet_residuals(diagnostic)
-    return float(residuals[int(index)])
 
 
 def _sparse_normal_singular_triplets(
@@ -2081,6 +2036,7 @@ def _validate_robust_method(value: object) -> str:
 
 _LSQ_SOLVE_SCALE_MIN = 1.0e-150
 _LSQ_SOLVE_SCALE_MAX = 1.0e150
+_LSQ_SOLVE_SCALED_ABS_MAX = 1.0e6
 _LSQ_FIRST_TOL = 1.0e-12
 _LSQ_FIRST_LSMR_TOL = 1.0e-12
 _LSQ_RETRY_TOL = 1.0e-13
@@ -2266,12 +2222,14 @@ def _common_lsq_solve_scale(
         matrix_abs_max = float(np.max(np.abs(matrix.data)))
     rhs_abs_max = 0.0 if rhs.size == 0 else float(np.max(np.abs(rhs)))
     if rhs_abs_max > 0.0:
-        reference = rhs_abs_max
+        scale = 1.0 / rhs_abs_max
     else:
-        reference = max(matrix_abs_max, 1.0)
-    if not np.isfinite(reference) or reference <= 0.0:
-        reference = 1.0
-    scale = 1.0 / reference
+        scale = 1.0 / max(matrix_abs_max, 1.0)
+    max_abs = max(matrix_abs_max, rhs_abs_max)
+    if max_abs > 0.0 and np.isfinite(max_abs):
+        scale = min(scale, _LSQ_SOLVE_SCALED_ABS_MAX / max_abs)
+    if not np.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
     return float(np.clip(scale, _LSQ_SOLVE_SCALE_MIN, _LSQ_SOLVE_SCALE_MAX))
 
 
@@ -2327,6 +2285,14 @@ def _verify_lsq_linear_solution(
     )
     if max_bound_violation > bound_tolerance:
         residual, gradient, objective = _lsq_residual_gradient_objective(system, x)
+        if not _lsq_quality_terms_are_finite(residual, gradient, objective):
+            return x, _nonfinite_lsq_quality(
+                **base_kwargs,
+                residual=residual,
+                objective=objective,
+                max_bound_violation=max_bound_violation,
+                bound_tolerance=bound_tolerance,
+            )
         pg_norm, kkt_tolerance = _projected_gradient_quality(
             system,
             x,
@@ -2350,6 +2316,14 @@ def _verify_lsq_linear_solution(
         x = np.maximum(x, system.lower_bounds)
         x[finite_upper] = np.minimum(x[finite_upper], system.upper_bounds[finite_upper])
     residual, gradient, objective = _lsq_residual_gradient_objective(system, x)
+    if not _lsq_quality_terms_are_finite(residual, gradient, objective):
+        return x, _nonfinite_lsq_quality(
+            **base_kwargs,
+            residual=residual,
+            objective=objective,
+            max_bound_violation=max_bound_violation,
+            bound_tolerance=bound_tolerance,
+        )
     residual_norm = float(np.linalg.norm(residual))
     pg_norm, kkt_tolerance = _projected_gradient_quality(
         system,
@@ -2398,6 +2372,52 @@ def _failed_lsq_quality(
         kkt_tolerance=0.0,
         max_bound_violation=np.inf,
         bound_tolerance=0.0,
+    )
+
+
+def _lsq_quality_terms_are_finite(
+    residual: np.ndarray,
+    gradient: np.ndarray,
+    objective: float,
+) -> bool:
+    return bool(
+        np.all(np.isfinite(residual))
+        and np.all(np.isfinite(gradient))
+        and np.isfinite(float(objective))
+    )
+
+
+def _nonfinite_lsq_quality(
+    *,
+    stage: str,
+    solve_scale: float,
+    scipy_success: bool,
+    scipy_status: int,
+    scipy_optimality: float,
+    scipy_iterations: int,
+    residual: np.ndarray,
+    objective: float,
+    max_bound_violation: float,
+    bound_tolerance: float,
+) -> _LsqLinearQualityDiagnostic:
+    residual_norm = float(np.linalg.norm(residual))
+    if not np.isfinite(residual_norm):
+        residual_norm = np.inf
+    return _LsqLinearQualityDiagnostic(
+        verified=False,
+        stage=stage,
+        failure_reason='solver residual, gradient, or objective is non-finite',
+        solve_scale=float(solve_scale),
+        scipy_success=bool(scipy_success),
+        scipy_status=int(scipy_status),
+        scipy_optimality=float(scipy_optimality),
+        scipy_iterations=int(scipy_iterations),
+        unscaled_augmented_residual_norm=residual_norm,
+        unscaled_objective=float(objective),
+        projected_gradient_inf_norm=np.inf,
+        kkt_tolerance=0.0,
+        max_bound_violation=float(max_bound_violation),
+        bound_tolerance=float(bound_tolerance),
     )
 
 
@@ -2467,25 +2487,63 @@ def _projected_gradient_quality(
     violation[upper_only] = np.maximum(gradient[upper_only], 0.0)
     pg_norm = float(np.max(violation)) if violation.size else 0.0
 
-    col_norm = np.sqrt(
-        np.asarray(system.augmented_matrix.power(2).sum(axis=0)).ravel()
-    )
+    col_norm = _sparse_column_l2_norms(system.augmented_matrix)
     max_col_norm = float(np.max(col_norm)) if col_norm.size else 0.0
     residual_norm = float(np.linalg.norm(residual))
     rhs_norm = float(np.linalg.norm(system.augmented_rhs_s))
     matrix_fro_norm = float(np.linalg.norm(system.augmented_matrix.data))
-    x_norm = float(np.linalg.norm(parameter_vector, ord=np.inf)) if parameter_vector.size else 0.0
+    x_norm = (
+        float(np.linalg.norm(parameter_vector, ord=np.inf))
+        if parameter_vector.size
+        else 0.0
+    )
+    residual_reference = _safe_nonnegative_product(max_col_norm, residual_norm)
+    normal_solution_reference = _safe_nonnegative_product(
+        matrix_fro_norm,
+        matrix_fro_norm,
+        x_norm,
+    )
+    rhs_reference = _safe_nonnegative_product(max_col_norm, rhs_norm)
     gradient_reference = max(
-        max_col_norm * residual_norm,
-        matrix_fro_norm * matrix_fro_norm * x_norm + max_col_norm * rhs_norm,
+        residual_reference,
+        normal_solution_reference + rhs_reference,
         np.finfo(np.float64).tiny,
     )
+    if not np.isfinite(gradient_reference):
+        return pg_norm, 0.0
     tolerance = max(
         1.0e-10 * gradient_reference,
         1.0e4 * np.finfo(np.float64).eps * gradient_reference,
         np.finfo(np.float64).tiny,
     )
     return pg_norm, float(tolerance)
+
+
+def _sparse_column_l2_norms(matrix: sparse.csr_matrix) -> np.ndarray:
+    csc = matrix.tocsc()
+    norms = np.empty(int(csc.shape[1]), dtype=np.float64)
+    for column_index in range(int(csc.shape[1])):
+        start = int(csc.indptr[column_index])
+        stop = int(csc.indptr[column_index + 1])
+        norms[column_index] = float(np.linalg.norm(csc.data[start:stop]))
+    return norms
+
+
+def _safe_nonnegative_product(*values: float) -> float:
+    factors = [float(value) for value in values]
+    if any(not np.isfinite(value) for value in factors):
+        return np.inf
+    if any(value < 0.0 for value in factors):
+        raise ValueError('safe product factors must be nonnegative')
+    if any(value == 0.0 for value in factors):
+        return 0.0
+    product = 1.0
+    max_float = np.finfo(np.float64).max
+    for factor in sorted(factors):
+        if factor > 1.0 and product > max_float / factor:
+            return np.inf
+        product *= factor
+    return float(product)
 
 
 def _active_set_polish_lsq_solution(
