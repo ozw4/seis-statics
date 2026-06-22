@@ -213,6 +213,26 @@ class _RefractionStaticRobustRunResult:
     stop_reason: RefractionStaticRobustStopReason
 
 
+@dataclass(frozen=True)
+class _LsqLinearQualityDiagnostic:
+    """Post-solve quality checks in the original unscaled LSQ system."""
+
+    verified: bool
+    stage: str
+    failure_reason: str
+    solve_scale: float
+    scipy_success: bool
+    scipy_status: int
+    scipy_optimality: float
+    scipy_iterations: int
+    unscaled_augmented_residual_norm: float
+    unscaled_objective: float
+    projected_gradient_inf_norm: float
+    kkt_tolerance: float
+    max_bound_violation: float
+    bound_tolerance: float
+
+
 def build_refraction_static_solver_system(
     design: RefractionStaticDesignMatrix,
     *,
@@ -489,6 +509,11 @@ def solve_refraction_static_design_least_squares(
         raw_parameter_vector,
         system=final_system,
         design=design,
+    )
+    _validate_canonicalized_lsq_solution(
+        raw_parameter_vector,
+        parameter_vector,
+        system=final_system,
     )
     _validate_finite(parameter_vector, name='parameter_vector')
     active_mask = _active_mask_for_parameter_vector(
@@ -1032,6 +1057,32 @@ def _validate_parameter_bounds(
     if np.any(lower_violation) or np.any(upper_violation):
         raise RefractionStaticSolverError(
             'canonical parameter vector violates solver bounds'
+        )
+
+
+def _validate_canonicalized_lsq_solution(
+    raw_parameter_vector: np.ndarray,
+    canonical_parameter_vector: np.ndarray,
+    *,
+    system: RefractionStaticSolveSystem,
+) -> None:
+    _validate_parameter_bounds(canonical_parameter_vector, system=system)
+    _, _, raw_objective = _lsq_residual_gradient_objective(
+        system,
+        np.ascontiguousarray(raw_parameter_vector, dtype=np.float64),
+    )
+    _, _, canonical_objective = _lsq_residual_gradient_objective(
+        system,
+        np.ascontiguousarray(canonical_parameter_vector, dtype=np.float64),
+    )
+    if not np.isclose(
+        canonical_objective,
+        raw_objective,
+        rtol=1.0e-9,
+        atol=max(1.0e-20, 1.0e-12 * max(1.0, raw_objective)),
+    ):
+        raise RefractionStaticSolverError(
+            'gauge canonicalization changed augmented objective'
         )
 
 
@@ -1657,9 +1708,14 @@ def _run_refraction_static_solver(
             current_residual,
             center_s=center_s,
         )
+        zero_scale_tolerance = _robust_zero_scale_tolerance(current_residual)
         n_used_before = int(np.count_nonzero(current_row_mask))
 
-        if scale_s <= 0.0:
+        if scale_s <= 0.0 or (
+            scale_s <= zero_scale_tolerance
+            and max_abs_centered_residual_s <= zero_scale_tolerance
+            and float(robust.threshold) <= 1.0
+        ):
             stop_reason = 'zero_scale'
             final_raw = raw
             final_system = current_system
@@ -1682,7 +1738,8 @@ def _run_refraction_static_solver(
             break
 
         current_row_index = np.flatnonzero(current_row_mask)
-        outlier_local = np.abs(current_residual - center_s) > cutoff_s
+        centered_abs = np.abs(current_residual - center_s)
+        outlier_local = centered_abs > cutoff_s
         if not np.any(outlier_local):
             stop_reason = 'converged'
             final_raw = raw
@@ -1957,6 +2014,13 @@ def _max_abs_centered_residual(
     return float(np.max(np.abs(residual_s - center_s)))
 
 
+def _robust_zero_scale_tolerance(residual_s: np.ndarray) -> float:
+    if residual_s.size == 0:
+        return 0.0
+    residual_scale = max(1.0, float(np.max(np.abs(residual_s))))
+    return float(1.0e3 * np.finfo(np.float64).eps * residual_scale)
+
+
 def _validate_robust_method(value: object) -> str:
     if value == 'mad':
         return 'mad'
@@ -1965,26 +2029,491 @@ def _validate_robust_method(value: object) -> str:
     raise RefractionStaticSolverError('solver.robust.method must be mad or sigma')
 
 
+_LSQ_SOLVE_SCALE_MIN = 1.0e-150
+_LSQ_SOLVE_SCALE_MAX = 1.0e150
+_LSQ_FIRST_TOL = 1.0e-12
+_LSQ_FIRST_LSMR_TOL = 1.0e-12
+_LSQ_RETRY_TOL = 1.0e-13
+_LSQ_RETRY_LSMR_TOL = 1.0e-14
+_LSQ_DENSE_RETRY_MAX_ELEMENTS = 200_000
+_LSQ_ACTIVE_SET_MAX_ITERATIONS = 20
+
+
 def _run_lsq_linear(system: RefractionStaticSolveSystem) -> optimize.OptimizeResult:
+    scale = _common_lsq_solve_scale(
+        system.augmented_matrix,
+        system.augmented_rhs_s,
+    )
+    attempts: list[tuple[str, optimize.OptimizeResult, _LsqLinearQualityDiagnostic]] = []
+    first = _run_scaled_lsq_linear_attempt(
+        system,
+        solve_scale=scale,
+        stage='first_attempt',
+        tol=_LSQ_FIRST_TOL,
+        lsmr_tol=_LSQ_FIRST_LSMR_TOL,
+        max_iter=max(100, 20 * int(system.n_parameters)),
+        dense=False,
+    )
+    first_x, first_quality = _verify_lsq_linear_solution(
+        system,
+        first.x,
+        solve_scale=scale,
+        stage='first_attempt',
+        scipy_result=first,
+    )
+    first.x = first_x
+    first.success = bool(first_quality.verified)
+    first.cost = first_quality.unscaled_objective
+    first.optimality = first_quality.projected_gradient_inf_norm
+    first.refraction_solver_quality = _lsq_quality_json(first_quality)
+    attempts.append(('first_attempt', first, first_quality))
+    if first_quality.verified:
+        polished = _active_set_polish_lsq_solution(
+            system,
+            first.x,
+            solve_scale=scale,
+            scipy_result=first,
+        )
+        if polished is not None:
+            polished_quality = polished.refraction_solver_quality_diagnostic
+            if (
+                polished_quality.verified
+                and polished_quality.unscaled_objective
+                <= first_quality.unscaled_objective
+                + max(1.0e-24, 1.0e-12 * max(1.0, first_quality.unscaled_objective))
+            ):
+                return polished
+        return first
+
+    retry = _run_scaled_lsq_linear_attempt(
+        system,
+        solve_scale=scale,
+        stage='retry_strict_lsmr',
+        tol=_LSQ_RETRY_TOL,
+        lsmr_tol=_LSQ_RETRY_LSMR_TOL,
+        max_iter=max(1000, 100 * int(system.n_parameters)),
+        dense=False,
+    )
+    retry_x, retry_quality = _verify_lsq_linear_solution(
+        system,
+        retry.x,
+        solve_scale=scale,
+        stage='retry_strict_lsmr',
+        scipy_result=retry,
+    )
+    retry.x = retry_x
+    retry.success = bool(retry_quality.verified)
+    retry.cost = retry_quality.unscaled_objective
+    retry.optimality = retry_quality.projected_gradient_inf_norm
+    retry.refraction_solver_quality = _lsq_quality_json(retry_quality)
+    attempts.append(('retry_strict_lsmr', retry, retry_quality))
+    if retry_quality.verified:
+        return retry
+
+    polished = _active_set_polish_lsq_solution(
+        system,
+        retry.x,
+        solve_scale=scale,
+        scipy_result=retry,
+    )
+    if polished is not None:
+        polished_quality = polished.refraction_solver_quality_diagnostic
+        attempts.append(('active_set_polish', polished, polished_quality))
+        if polished_quality.verified:
+            return polished
+
+    if _can_use_dense_lsq_retry(system.augmented_matrix):
+        dense = _run_scaled_lsq_linear_attempt(
+            system,
+            solve_scale=scale,
+            stage='dense_bvls_retry',
+            tol=_LSQ_RETRY_TOL,
+            lsmr_tol=_LSQ_RETRY_LSMR_TOL,
+            max_iter=max(1000, 100 * int(system.n_parameters)),
+            dense=True,
+        )
+        dense_x, dense_quality = _verify_lsq_linear_solution(
+            system,
+            dense.x,
+            solve_scale=scale,
+            stage='dense_bvls_retry',
+            scipy_result=dense,
+        )
+        dense.x = dense_x
+        dense.success = bool(dense_quality.verified)
+        dense.cost = dense_quality.unscaled_objective
+        dense.optimality = dense_quality.projected_gradient_inf_norm
+        dense.refraction_solver_quality = _lsq_quality_json(dense_quality)
+        attempts.append(('dense_bvls_retry', dense, dense_quality))
+        if dense_quality.verified:
+            return dense
+
+    best_stage, best_result, best_quality = min(
+        attempts,
+        key=lambda item: (
+            item[2].projected_gradient_inf_norm,
+            item[2].unscaled_objective,
+        ),
+    )
+    best_result.refraction_solver_quality = _lsq_quality_json(best_quality)
+    raise RefractionStaticSolverError(
+        'refraction static lsq_linear solve failed quality verification '
+        f'at {best_stage}: {best_quality.failure_reason}'
+    )
+
+
+def _run_scaled_lsq_linear_attempt(
+    system: RefractionStaticSolveSystem,
+    *,
+    solve_scale: float,
+    stage: str,
+    tol: float,
+    lsmr_tol: float,
+    max_iter: int,
+    dense: bool,
+) -> optimize.OptimizeResult:
+    matrix = system.augmented_matrix * float(solve_scale)
+    rhs = np.ascontiguousarray(system.augmented_rhs_s * float(solve_scale))
+    solver_matrix: sparse.csr_matrix | np.ndarray
+    method = 'trf'
+    lsq_solver: str | None = 'lsmr'
+    if dense:
+        solver_matrix = matrix.toarray()
+        method = 'bvls'
+        lsq_solver = None
+    else:
+        solver_matrix = matrix
     try:
         result = optimize.lsq_linear(
-            system.augmented_matrix,
-            system.augmented_rhs_s,
+            solver_matrix,
+            rhs,
             bounds=(system.lower_bounds, system.upper_bounds),
-            method='trf',
-            tol=1.0e-10,
-            lsq_solver='lsmr',
-            lsmr_tol='auto',
-            max_iter=None,
+            method=method,
+            tol=float(tol),
+            lsq_solver=lsq_solver,
+            lsmr_tol=None if dense else float(lsmr_tol),
+            max_iter=int(max_iter),
             verbose=0,
         )
     except Exception as exc:
         raise RefractionStaticSolverError(
-            'refraction static lsq_linear solve failed'
+            f'refraction static lsq_linear solve failed during {stage}'
         ) from exc
     if result.x.shape != (system.n_parameters,):
         raise RefractionStaticSolverError('solver x shape mismatch')
+    result.refraction_solver_stage = stage
+    result.refraction_solver_scale = float(solve_scale)
     return result
+
+
+def _common_lsq_solve_scale(
+    matrix: sparse.csr_matrix,
+    rhs: np.ndarray,
+) -> float:
+    matrix_abs_max = 0.0
+    if matrix.nnz:
+        matrix_abs_max = float(np.max(np.abs(matrix.data)))
+    rhs_abs_max = 0.0 if rhs.size == 0 else float(np.max(np.abs(rhs)))
+    if rhs_abs_max > 0.0:
+        reference = rhs_abs_max
+    else:
+        reference = max(matrix_abs_max, 1.0)
+    if not np.isfinite(reference) or reference <= 0.0:
+        reference = 1.0
+    scale = 1.0 / reference
+    return float(np.clip(scale, _LSQ_SOLVE_SCALE_MIN, _LSQ_SOLVE_SCALE_MAX))
+
+
+def _can_use_dense_lsq_retry(matrix: sparse.csr_matrix) -> bool:
+    return int(matrix.shape[0]) * int(matrix.shape[1]) <= _LSQ_DENSE_RETRY_MAX_ELEMENTS
+
+
+def _verify_lsq_linear_solution(
+    system: RefractionStaticSolveSystem,
+    parameter_vector: np.ndarray,
+    *,
+    solve_scale: float,
+    stage: str,
+    scipy_result: optimize.OptimizeResult | None = None,
+) -> tuple[np.ndarray, _LsqLinearQualityDiagnostic]:
+    x = np.ascontiguousarray(parameter_vector, dtype=np.float64)
+    scipy_success = bool(getattr(scipy_result, 'success', False))
+    scipy_status = int(getattr(scipy_result, 'status', 0))
+    scipy_optimality = float(getattr(scipy_result, 'optimality', np.nan))
+    scipy_iterations = int(getattr(scipy_result, 'nit', -1))
+    base_kwargs = {
+        'stage': stage,
+        'solve_scale': float(solve_scale),
+        'scipy_success': scipy_success,
+        'scipy_status': scipy_status,
+        'scipy_optimality': scipy_optimality,
+        'scipy_iterations': scipy_iterations,
+    }
+    if x.shape != (system.n_parameters,):
+        return x, _failed_lsq_quality(
+            **base_kwargs,
+            failure_reason='solver x shape mismatch',
+        )
+    if not np.all(np.isfinite(x)):
+        return x, _failed_lsq_quality(
+            **base_kwargs,
+            failure_reason='solver x contains non-finite values',
+        )
+
+    bound_tolerance = _lsq_bound_tolerance(system, x)
+    lower_violation = np.maximum(system.lower_bounds - x, 0.0)
+    finite_upper = np.isfinite(system.upper_bounds)
+    upper_violation = np.zeros_like(x)
+    upper_violation[finite_upper] = np.maximum(
+        x[finite_upper] - system.upper_bounds[finite_upper],
+        0.0,
+    )
+    max_bound_violation = float(
+        max(
+            float(np.max(lower_violation)) if lower_violation.size else 0.0,
+            float(np.max(upper_violation)) if upper_violation.size else 0.0,
+        )
+    )
+    if max_bound_violation > bound_tolerance:
+        residual, gradient, objective = _lsq_residual_gradient_objective(system, x)
+        pg_norm, kkt_tolerance = _projected_gradient_quality(
+            system,
+            x,
+            residual,
+            gradient,
+            bound_tolerance=bound_tolerance,
+        )
+        return x, _LsqLinearQualityDiagnostic(
+            verified=False,
+            failure_reason='solver x violates bounds',
+            unscaled_augmented_residual_norm=float(np.linalg.norm(residual)),
+            unscaled_objective=objective,
+            projected_gradient_inf_norm=pg_norm,
+            kkt_tolerance=kkt_tolerance,
+            max_bound_violation=max_bound_violation,
+            bound_tolerance=bound_tolerance,
+            **base_kwargs,
+        )
+
+    if max_bound_violation > 0.0:
+        x = np.maximum(x, system.lower_bounds)
+        x[finite_upper] = np.minimum(x[finite_upper], system.upper_bounds[finite_upper])
+    residual, gradient, objective = _lsq_residual_gradient_objective(system, x)
+    residual_norm = float(np.linalg.norm(residual))
+    pg_norm, kkt_tolerance = _projected_gradient_quality(
+        system,
+        x,
+        residual,
+        gradient,
+        bound_tolerance=bound_tolerance,
+    )
+    verified = bool(pg_norm <= kkt_tolerance)
+    reason = '' if verified else 'projected gradient violates KKT tolerance'
+    return x, _LsqLinearQualityDiagnostic(
+        verified=verified,
+        failure_reason=reason,
+        unscaled_augmented_residual_norm=residual_norm,
+        unscaled_objective=objective,
+        projected_gradient_inf_norm=pg_norm,
+        kkt_tolerance=kkt_tolerance,
+        max_bound_violation=max_bound_violation,
+        bound_tolerance=bound_tolerance,
+        **base_kwargs,
+    )
+
+
+def _failed_lsq_quality(
+    *,
+    stage: str,
+    solve_scale: float,
+    scipy_success: bool,
+    scipy_status: int,
+    scipy_optimality: float,
+    scipy_iterations: int,
+    failure_reason: str,
+) -> _LsqLinearQualityDiagnostic:
+    return _LsqLinearQualityDiagnostic(
+        verified=False,
+        stage=stage,
+        failure_reason=failure_reason,
+        solve_scale=float(solve_scale),
+        scipy_success=bool(scipy_success),
+        scipy_status=int(scipy_status),
+        scipy_optimality=float(scipy_optimality),
+        scipy_iterations=int(scipy_iterations),
+        unscaled_augmented_residual_norm=np.inf,
+        unscaled_objective=np.inf,
+        projected_gradient_inf_norm=np.inf,
+        kkt_tolerance=0.0,
+        max_bound_violation=np.inf,
+        bound_tolerance=0.0,
+    )
+
+
+def _lsq_residual_gradient_objective(
+    system: RefractionStaticSolveSystem,
+    parameter_vector: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    residual = np.ascontiguousarray(
+        system.augmented_matrix @ parameter_vector - system.augmented_rhs_s,
+        dtype=np.float64,
+    )
+    gradient = np.ascontiguousarray(system.augmented_matrix.T @ residual, dtype=np.float64)
+    objective = float(0.5 * np.dot(residual, residual))
+    return residual, gradient, objective
+
+
+def _lsq_bound_tolerance(
+    system: RefractionStaticSolveSystem,
+    parameter_vector: np.ndarray,
+) -> float:
+    finite_upper = system.upper_bounds[np.isfinite(system.upper_bounds)]
+    bound_scale = 1.0
+    if finite_upper.size:
+        bound_scale = max(bound_scale, float(np.max(np.abs(finite_upper))))
+    if system.lower_bounds.size:
+        bound_scale = max(bound_scale, float(np.max(np.abs(system.lower_bounds))))
+    if parameter_vector.size:
+        bound_scale = max(bound_scale, float(np.max(np.abs(parameter_vector))))
+    return float(max(1.0e3 * np.finfo(np.float64).eps * bound_scale, 1.0e-15 * bound_scale))
+
+
+def _projected_gradient_quality(
+    system: RefractionStaticSolveSystem,
+    parameter_vector: np.ndarray,
+    residual: np.ndarray,
+    gradient: np.ndarray,
+    *,
+    bound_tolerance: float,
+) -> tuple[float, float]:
+    lower_active = parameter_vector <= system.lower_bounds + bound_tolerance
+    finite_upper = np.isfinite(system.upper_bounds)
+    upper_active = finite_upper & (
+        parameter_vector >= system.upper_bounds - bound_tolerance
+    )
+    fixed = lower_active & upper_active
+    free = ~(lower_active | upper_active)
+    violation = np.zeros_like(gradient)
+    violation[free] = np.abs(gradient[free])
+    lower_only = lower_active & ~fixed
+    upper_only = upper_active & ~fixed
+    violation[lower_only] = np.maximum(-gradient[lower_only], 0.0)
+    violation[upper_only] = np.maximum(gradient[upper_only], 0.0)
+    pg_norm = float(np.max(violation)) if violation.size else 0.0
+
+    col_norm = np.sqrt(
+        np.asarray(system.augmented_matrix.power(2).sum(axis=0)).ravel()
+    )
+    max_col_norm = float(np.max(col_norm)) if col_norm.size else 0.0
+    residual_norm = float(np.linalg.norm(residual))
+    rhs_norm = float(np.linalg.norm(system.augmented_rhs_s))
+    matrix_fro_norm = float(np.linalg.norm(system.augmented_matrix.data))
+    x_norm = float(np.linalg.norm(parameter_vector, ord=np.inf)) if parameter_vector.size else 0.0
+    gradient_reference = max(
+        max_col_norm * residual_norm,
+        matrix_fro_norm * matrix_fro_norm * x_norm + max_col_norm * rhs_norm,
+        np.finfo(np.float64).tiny,
+    )
+    tolerance = max(
+        1.0e-10 * gradient_reference,
+        1.0e4 * np.finfo(np.float64).eps * gradient_reference,
+        np.finfo(np.float64).tiny,
+    )
+    return pg_norm, float(tolerance)
+
+
+def _active_set_polish_lsq_solution(
+    system: RefractionStaticSolveSystem,
+    parameter_vector: np.ndarray,
+    *,
+    solve_scale: float,
+    scipy_result: optimize.OptimizeResult,
+) -> optimize.OptimizeResult | None:
+    if not _can_use_dense_lsq_retry(system.augmented_matrix):
+        return None
+    x = np.ascontiguousarray(parameter_vector, dtype=np.float64)
+    x = np.maximum(x, system.lower_bounds)
+    finite_upper = np.isfinite(system.upper_bounds)
+    x[finite_upper] = np.minimum(x[finite_upper], system.upper_bounds[finite_upper])
+    matrix = system.augmented_matrix.toarray()
+    rhs = system.augmented_rhs_s
+    _, _, best_objective = _lsq_residual_gradient_objective(system, x)
+    for _ in range(_LSQ_ACTIVE_SET_MAX_ITERATIONS):
+        bound_tolerance = _lsq_bound_tolerance(system, x)
+        lower_active = x <= system.lower_bounds + bound_tolerance
+        upper_active = finite_upper & (x >= system.upper_bounds - bound_tolerance)
+        active = lower_active | upper_active
+        free = ~active
+        candidate = x.copy()
+        if np.any(free):
+            fixed_prediction = matrix[:, active] @ candidate[active]
+            free_solution, *_ = np.linalg.lstsq(
+                matrix[:, free],
+                rhs - fixed_prediction,
+                rcond=None,
+            )
+            candidate[free] = free_solution
+        candidate = np.maximum(candidate, system.lower_bounds)
+        candidate[finite_upper] = np.minimum(
+            candidate[finite_upper],
+            system.upper_bounds[finite_upper],
+        )
+        _, _, objective = _lsq_residual_gradient_objective(system, candidate)
+        if objective > best_objective + max(1.0e-24, 1.0e-12 * max(1.0, best_objective)):
+            break
+        x = candidate
+        best_objective = objective
+        verified_x, quality = _verify_lsq_linear_solution(
+            system,
+            x,
+            solve_scale=solve_scale,
+            stage='active_set_polish',
+            scipy_result=scipy_result,
+        )
+        x = verified_x
+        if quality.verified:
+            result = optimize.OptimizeResult()
+            result.x = x
+            result.success = bool(quality.verified)
+            result.status = int(getattr(scipy_result, 'status', 0))
+            result.message = 'active-set polished after lsq_linear retry'
+            result.cost = quality.unscaled_objective * solve_scale * solve_scale
+            result.optimality = quality.projected_gradient_inf_norm
+            result.active_mask = _active_mask_for_parameter_vector(
+                x,
+                lower_bounds=system.lower_bounds,
+                upper_bounds=system.upper_bounds,
+            )
+            result.nit = int(getattr(scipy_result, 'nit', 0))
+            result.refraction_solver_stage = 'active_set_polish'
+            result.refraction_solver_scale = float(solve_scale)
+            result.refraction_solver_quality_diagnostic = quality
+            result.refraction_solver_quality = _lsq_quality_json(quality)
+            return result
+    return None
+
+
+def _lsq_quality_json(diagnostic: _LsqLinearQualityDiagnostic) -> dict[str, Any]:
+    return {
+        'verified': bool(diagnostic.verified),
+        'stage': diagnostic.stage,
+        'failure_reason': diagnostic.failure_reason,
+        'solve_scale': _json_finite_float(diagnostic.solve_scale),
+        'scipy_success': bool(diagnostic.scipy_success),
+        'scipy_status': int(diagnostic.scipy_status),
+        'scipy_optimality': _json_finite_float(diagnostic.scipy_optimality),
+        'scipy_iterations': int(diagnostic.scipy_iterations),
+        'unscaled_augmented_residual_norm': _json_finite_float(
+            diagnostic.unscaled_augmented_residual_norm
+        ),
+        'unscaled_objective': _json_finite_float(diagnostic.unscaled_objective),
+        'projected_gradient_inf_norm': _json_finite_float(
+            diagnostic.projected_gradient_inf_norm
+        ),
+        'kkt_tolerance': _json_finite_float(diagnostic.kkt_tolerance),
+        'max_bound_violation': _json_finite_float(diagnostic.max_bound_violation),
+        'bound_tolerance': _json_finite_float(diagnostic.bound_tolerance),
+    }
 
 
 def _row_modeled_pick_time(
@@ -2459,6 +2988,9 @@ def _build_solver_qc(
         'solver_cost': float(result.cost),
         'solver_optimality': float(result.optimality),
         'solver_iterations': int(result.nit),
+        'solver_quality': dict(
+            getattr(result, 'refraction_solver_quality', {})
+        ),
         'rms_residual_ms': float(rms_residual_s * 1000.0),
         'physical_identifiability': _identifiability_diagnostic_json(
             system.identifiability

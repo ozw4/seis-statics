@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
-from scipy import sparse
+from scipy import optimize, sparse
 
 from seis_statics.refraction import (
     RefractionStaticModelOptions,
@@ -44,6 +46,73 @@ def _model(
         ),
         min_bedrock_velocity_m_s=min_velocity,
         max_bedrock_velocity_m_s=max_velocity,
+    )
+
+
+def _simple_lsq_system(
+    matrix: np.ndarray,
+    rhs: np.ndarray,
+    *,
+    lower: np.ndarray | None = None,
+    upper: np.ndarray | None = None,
+) -> solver_module.RefractionStaticSolveSystem:
+    csr = sparse.csr_matrix(np.asarray(matrix, dtype=np.float64))
+    rhs_array = np.ascontiguousarray(rhs, dtype=np.float64)
+    n_parameters = int(csr.shape[1])
+    lower_bounds = (
+        np.zeros(n_parameters, dtype=np.float64)
+        if lower is None
+        else np.ascontiguousarray(lower, dtype=np.float64)
+    )
+    upper_bounds = (
+        np.full(n_parameters, np.inf, dtype=np.float64)
+        if upper is None
+        else np.ascontiguousarray(upper, dtype=np.float64)
+    )
+    return solver_module.RefractionStaticSolveSystem(
+        augmented_matrix=csr,
+        augmented_rhs_s=rhs_array,
+        observation_matrix=csr,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+        initial_parameter_vector=np.zeros(n_parameters, dtype=np.float64),
+        n_observation_rows=int(csr.shape[0]),
+        n_smoothing_rows=0,
+        n_damping_rows=0,
+        n_gauge_rows=0,
+        n_augmented_rows=int(csr.shape[0]),
+        n_parameters=n_parameters,
+        component_id_by_node=np.arange(n_parameters, dtype=np.int64),
+        n_node_components=n_parameters,
+        is_bipartite_by_component=np.zeros(n_parameters, dtype=bool),
+        signed_partition_by_node=np.ones(n_parameters, dtype=np.int64),
+        gauge_required_by_component=np.zeros(n_parameters, dtype=bool),
+        n_bipartite_node_components=0,
+        gauge_resolution='not_required',
+        half_intercept_damping_lambda=0.0,
+        regularized_parameter_group='node_half_intercept_time_s',
+        regularization_row_count=0,
+        node_lower_bound_s=0.0,
+        node_upper_bound_s=float(np.max(upper_bounds[np.isfinite(upper_bounds)]))
+        if np.any(np.isfinite(upper_bounds))
+        else np.inf,
+        slowness_lower_bound_s_per_m=None,
+        slowness_upper_bound_s_per_m=None,
+        initial_bedrock_slowness_s_per_m=None,
+        smoothing_rows=None,
+        identifiability=solver_module._NumericalRankDiagnostic(
+            method='test',
+            n_rows=int(csr.shape[0]),
+            n_columns=n_parameters,
+            expected_rank=n_parameters,
+            estimated_rank=n_parameters,
+            expected_nullity=0,
+            gauge_nullity=0,
+            threshold=0.0,
+            critical_singular_value=1.0,
+            largest_singular_value=1.0,
+            rtol=0.0,
+        ),
     )
 
 
@@ -125,6 +194,237 @@ def test_refraction_solver_solve_global_matches_known_parameters_and_residual() 
     assert result.qc['solver_name'] == 'lsq_linear'
     assert result.qc['physical_identifiability']['expected_rank'] == 4
     assert result.qc['physical_identifiability']['estimated_numerical_rank'] == 4
+
+
+@pytest.mark.parametrize('excess_s', [1.0e-6, 0.1])
+def test_refraction_solver_fixed_global_exact_fit_is_scale_stable(
+    excess_s: float,
+) -> None:
+    fixed_velocity = 2500.0
+    distance_m = np.asarray([500.0, 500.0], dtype=np.float64)
+    pick_time = distance_m / fixed_velocity + np.asarray(
+        [excess_s, 0.0],
+        dtype=np.float64,
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(2, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 20], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([30, 30], dtype=np.int64),
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=1,
+        n_traces=2,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(min_picks_per_node=1),
+    )
+
+    np.testing.assert_allclose(result.row_residual_s, 0.0, atol=1.0e-10)
+    np.testing.assert_allclose(
+        result.node_half_intercept_time_s,
+        [excess_s, 0.0, 0.0],
+        atol=1.0e-10,
+    )
+    assert result.solver_success
+    assert result.qc['solver_quality']['verified'] is True
+    assert result.qc['solver_quality']['solve_scale'] > 0.0
+
+
+def test_refraction_lsq_solution_is_invariant_to_common_system_scale() -> None:
+    base = _simple_lsq_system(
+        np.asarray([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=np.float64),
+        np.asarray([0.2, 0.4, 0.6], dtype=np.float64),
+        lower=np.zeros(2, dtype=np.float64),
+        upper=np.ones(2, dtype=np.float64),
+    )
+    base_result = solver_module._run_lsq_linear(base)
+
+    for common_scale in (1.0e-9, 1.0e9):
+        scaled = replace(
+            base,
+            augmented_matrix=base.augmented_matrix * common_scale,
+            augmented_rhs_s=base.augmented_rhs_s * common_scale,
+            observation_matrix=base.observation_matrix * common_scale,
+        )
+        result = solver_module._run_lsq_linear(scaled)
+        np.testing.assert_allclose(result.x, base_result.x, atol=1.0e-10)
+        np.testing.assert_array_equal(
+            result.active_mask,
+            base_result.active_mask,
+        )
+        assert result.refraction_solver_quality['verified'] is True
+
+
+def test_refraction_lsq_kkt_verifier_rejects_suboptimal_feasible_candidate() -> None:
+    system = _simple_lsq_system(
+        np.eye(2, dtype=np.float64),
+        np.asarray([1.0e-6, 0.0], dtype=np.float64),
+        lower=np.zeros(2, dtype=np.float64),
+        upper=np.ones(2, dtype=np.float64),
+    )
+    candidate = np.zeros(2, dtype=np.float64)
+    fake = optimize.OptimizeResult(
+        success=True,
+        status=1,
+        optimality=0.0,
+        nit=1,
+    )
+
+    _, quality = solver_module._verify_lsq_linear_solution(
+        system,
+        candidate,
+        solve_scale=1.0,
+        stage='test',
+        scipy_result=fake,
+    )
+
+    assert not quality.verified
+    assert quality.projected_gradient_inf_norm > quality.kkt_tolerance
+
+
+def test_refraction_lsq_kkt_verifier_handles_bound_gradient_signs() -> None:
+    lower_system = _simple_lsq_system(
+        np.ones((1, 1), dtype=np.float64),
+        np.asarray([-1.0], dtype=np.float64),
+        lower=np.zeros(1, dtype=np.float64),
+        upper=np.full(1, np.inf, dtype=np.float64),
+    )
+    upper_system = _simple_lsq_system(
+        np.ones((1, 1), dtype=np.float64),
+        np.asarray([2.0], dtype=np.float64),
+        lower=np.zeros(1, dtype=np.float64),
+        upper=np.ones(1, dtype=np.float64),
+    )
+    fake = optimize.OptimizeResult(success=True, status=1, optimality=0.0, nit=1)
+
+    _, lower_quality = solver_module._verify_lsq_linear_solution(
+        lower_system,
+        np.asarray([0.0], dtype=np.float64),
+        solve_scale=1.0,
+        stage='lower',
+        scipy_result=fake,
+    )
+    _, lower_bad = solver_module._verify_lsq_linear_solution(
+        _simple_lsq_system(
+            np.ones((1, 1), dtype=np.float64),
+            np.asarray([1.0], dtype=np.float64),
+            lower=np.zeros(1, dtype=np.float64),
+            upper=np.full(1, np.inf, dtype=np.float64),
+        ),
+        np.asarray([0.0], dtype=np.float64),
+        solve_scale=1.0,
+        stage='lower_bad',
+        scipy_result=fake,
+    )
+    _, upper_quality = solver_module._verify_lsq_linear_solution(
+        upper_system,
+        np.asarray([1.0], dtype=np.float64),
+        solve_scale=1.0,
+        stage='upper',
+        scipy_result=fake,
+    )
+    _, upper_bad = solver_module._verify_lsq_linear_solution(
+        _simple_lsq_system(
+            np.ones((1, 1), dtype=np.float64),
+            np.asarray([0.0], dtype=np.float64),
+            lower=np.zeros(1, dtype=np.float64),
+            upper=np.ones(1, dtype=np.float64),
+        ),
+        np.asarray([1.0], dtype=np.float64),
+        solve_scale=1.0,
+        stage='upper_bad',
+        scipy_result=fake,
+    )
+
+    assert lower_quality.verified
+    assert upper_quality.verified
+    assert not lower_bad.verified
+    assert not upper_bad.verified
+
+
+def test_refraction_lsq_accepts_noisy_inconsistent_kkt_solution() -> None:
+    system = _simple_lsq_system(
+        np.ones((2, 1), dtype=np.float64),
+        np.asarray([0.0, 1.0], dtype=np.float64),
+        lower=np.zeros(1, dtype=np.float64),
+        upper=np.ones(1, dtype=np.float64),
+    )
+
+    result = solver_module._run_lsq_linear(system)
+
+    np.testing.assert_allclose(result.x, [0.5], atol=1.0e-10)
+    assert result.success
+    assert result.refraction_solver_quality['unscaled_augmented_residual_norm'] > 0.0
+    assert result.refraction_solver_quality['verified'] is True
+
+
+def test_refraction_lsq_active_set_polish_improves_failed_attempt() -> None:
+    system = _simple_lsq_system(
+        np.eye(2, dtype=np.float64),
+        np.asarray([0.25, 0.75], dtype=np.float64),
+        lower=np.zeros(2, dtype=np.float64),
+        upper=np.ones(2, dtype=np.float64),
+    )
+    fake = optimize.OptimizeResult(success=True, status=1, optimality=1.0, nit=1)
+    _, _, before_objective = solver_module._lsq_residual_gradient_objective(
+        system,
+        np.asarray([0.4, 0.4], dtype=np.float64),
+    )
+
+    polished = solver_module._active_set_polish_lsq_solution(
+        system,
+        np.asarray([0.4, 0.4], dtype=np.float64),
+        solve_scale=1.0,
+        scipy_result=fake,
+    )
+
+    assert polished is not None
+    assert polished.refraction_solver_quality['stage'] == 'active_set_polish'
+    assert polished.refraction_solver_quality['verified'] is True
+    assert polished.refraction_solver_quality['unscaled_objective'] <= before_objective
+    np.testing.assert_allclose(polished.x, [0.25, 0.75], atol=1.0e-12)
+
+
+def test_refraction_lsq_failure_remains_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system = _simple_lsq_system(
+        np.eye(1, dtype=np.float64),
+        np.asarray([1.0], dtype=np.float64),
+        lower=np.zeros(1, dtype=np.float64),
+        upper=np.ones(1, dtype=np.float64),
+    )
+
+    def suboptimal_attempt(*args: object, **kwargs: object) -> optimize.OptimizeResult:
+        return optimize.OptimizeResult(
+            x=np.asarray([0.0], dtype=np.float64),
+            success=True,
+            status=1,
+            message='forced',
+            cost=0.5,
+            optimality=0.0,
+            nit=1,
+        )
+
+    monkeypatch.setattr(
+        solver_module,
+        '_run_scaled_lsq_linear_attempt',
+        suboptimal_attempt,
+    )
+    monkeypatch.setattr(solver_module, '_active_set_polish_lsq_solution', lambda *a, **k: None)
+    monkeypatch.setattr(solver_module, '_can_use_dense_lsq_retry', lambda matrix: False)
+
+    with pytest.raises(
+        RefractionStaticSolverError,
+        match='failed quality verification',
+    ):
+        solver_module._run_lsq_linear(system)
 
 
 def test_refraction_solver_rejects_global_slowness_underdetermined() -> None:
