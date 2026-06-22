@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import numpy as np
 from scipy import optimize, sparse
+from scipy.sparse.csgraph import structural_rank
 
 from seis_statics._validation import (
     coerce_1d_integer_int64 as _common_coerce_1d_integer_int64,
@@ -192,6 +193,7 @@ def build_refraction_static_solver_system(
     *,
     model: Any,
     solver_options: RefractionStaticSolverOptions | None = None,
+    row_used_mask: np.ndarray | None = None,
 ) -> RefractionStaticSolveSystem:
     """Build observation, damping, gauge, bounds, and initial vector."""
     options = validate_refraction_static_solver_options(solver_options)
@@ -236,22 +238,73 @@ def build_refraction_static_solver_system(
         n_active_nodes=design.n_active_nodes,
         half_intercept_damping_lambda=options.half_intercept_damping_lambda,
     )
-    graph = _analyze_design_endpoint_graph(design)
+    return _build_refraction_static_solver_system_from_parts(
+        design=design,
+        row_used_mask=row_used_mask,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+        initial_parameter_vector=initial,
+        smoothing_rows=smoothing_rows,
+        damping_matrix=damping_matrix,
+        damping_rhs=damping_rhs,
+        half_intercept_damping_lambda=options.half_intercept_damping_lambda,
+        node_lower_bound_s=0.0,
+        node_upper_bound_s=float(node_upper),
+        slowness_lower_bound_s_per_m=slowness_lower,
+        slowness_upper_bound_s_per_m=slowness_upper,
+        initial_bedrock_slowness_s_per_m=initial_slowness,
+    )
+
+
+def _build_refraction_static_solver_system_from_parts(
+    *,
+    design: RefractionStaticDesignMatrix,
+    row_used_mask: np.ndarray | None,
+    lower_bounds: np.ndarray,
+    upper_bounds: np.ndarray,
+    initial_parameter_vector: np.ndarray,
+    smoothing_rows: CellSlownessSmoothingRows | None,
+    damping_matrix: sparse.csr_matrix,
+    damping_rhs: np.ndarray,
+    half_intercept_damping_lambda: float,
+    node_lower_bound_s: float,
+    node_upper_bound_s: float,
+    slowness_lower_bound_s_per_m: float | None,
+    slowness_upper_bound_s_per_m: float | None,
+    initial_bedrock_slowness_s_per_m: float | None,
+) -> RefractionStaticSolveSystem:
+    n_parameters = int(design.n_parameters)
+    mask = (
+        np.ones(design.n_observations, dtype=bool)
+        if row_used_mask is None
+        else _coerce_design_row_mask(design, row_used_mask=row_used_mask)
+    )
+    used_rows = np.flatnonzero(mask).astype(np.int64, copy=False)
+    if used_rows.size == 0:
+        raise RefractionStaticSolverError(
+            'refraction solver system requires at least one observation row'
+        )
+
+    observation_matrix = design.matrix[used_rows].tocsr()
+    observation_rhs = np.ascontiguousarray(design.rhs_s[used_rows], dtype=np.float64)
+    graph = _analyze_design_endpoint_graph(design, row_used_mask=mask)
     gauge_matrix = build_endpoint_sum_gauge_matrix(
         graph=graph,
         n_columns=n_parameters,
         gauge_weight=1.0,
     )
     gauge_rhs = np.zeros(gauge_matrix.shape[0], dtype=np.float64)
+    smoothing_matrix = (
+        smoothing_rows.matrix if smoothing_rows is not None else _empty_rows(n_parameters)
+    )
+    smoothing_rhs = (
+        smoothing_rows.rhs_s if smoothing_rows is not None else np.empty(0)
+    )
 
     augmented_matrix = sparse.vstack(
         [
-            design.matrix,
-            (
-                smoothing_rows.matrix
-                if smoothing_rows is not None
-                else _empty_rows(n_parameters)
-            ),
+            observation_matrix,
+            smoothing_matrix,
             damping_matrix,
             gauge_matrix,
         ],
@@ -262,8 +315,8 @@ def build_refraction_static_solver_system(
     augmented_rhs = np.ascontiguousarray(
         np.concatenate(
             [
-                design.rhs_s,
-                smoothing_rows.rhs_s if smoothing_rows is not None else np.empty(0),
+                observation_rhs,
+                smoothing_rhs,
                 damping_rhs,
                 gauge_rhs,
             ]
@@ -284,8 +337,11 @@ def build_refraction_static_solver_system(
         augmented_rhs_s=augmented_rhs,
         lower_bounds=np.ascontiguousarray(lower_bounds, dtype=np.float64),
         upper_bounds=np.ascontiguousarray(upper_bounds, dtype=np.float64),
-        initial_parameter_vector=np.ascontiguousarray(initial, dtype=np.float64),
-        n_observation_rows=int(design.n_observations),
+        initial_parameter_vector=np.ascontiguousarray(
+            initial_parameter_vector,
+            dtype=np.float64,
+        ),
+        n_observation_rows=int(used_rows.size),
         n_smoothing_rows=0 if smoothing_rows is None else smoothing_rows.n_rows,
         n_damping_rows=int(damping_matrix.shape[0]),
         n_gauge_rows=int(gauge_matrix.shape[0]),
@@ -299,15 +355,44 @@ def build_refraction_static_solver_system(
         n_bipartite_node_components=int(
             np.count_nonzero(graph.is_bipartite_by_component)
         ),
-        half_intercept_damping_lambda=options.half_intercept_damping_lambda,
+        half_intercept_damping_lambda=float(half_intercept_damping_lambda),
         regularized_parameter_group='node_half_intercept_time_s',
         regularization_row_count=int(damping_matrix.shape[0]),
-        node_lower_bound_s=0.0,
-        node_upper_bound_s=float(node_upper),
-        slowness_lower_bound_s_per_m=slowness_lower,
-        slowness_upper_bound_s_per_m=slowness_upper,
-        initial_bedrock_slowness_s_per_m=initial_slowness,
+        node_lower_bound_s=float(node_lower_bound_s),
+        node_upper_bound_s=float(node_upper_bound_s),
+        slowness_lower_bound_s_per_m=slowness_lower_bound_s_per_m,
+        slowness_upper_bound_s_per_m=slowness_upper_bound_s_per_m,
+        initial_bedrock_slowness_s_per_m=initial_bedrock_slowness_s_per_m,
         smoothing_rows=smoothing_rows,
+    )
+
+
+def _rebuild_refraction_static_solver_system_for_row_mask(
+    *,
+    design: RefractionStaticDesignMatrix,
+    system: RefractionStaticSolveSystem,
+    row_used_mask: np.ndarray,
+) -> RefractionStaticSolveSystem:
+    damping_matrix, damping_rhs = _build_damping_system(
+        n_parameters=system.n_parameters,
+        n_active_nodes=design.n_active_nodes,
+        half_intercept_damping_lambda=system.half_intercept_damping_lambda,
+    )
+    return _build_refraction_static_solver_system_from_parts(
+        design=design,
+        row_used_mask=row_used_mask,
+        lower_bounds=system.lower_bounds,
+        upper_bounds=system.upper_bounds,
+        initial_parameter_vector=system.initial_parameter_vector,
+        smoothing_rows=system.smoothing_rows,
+        damping_matrix=damping_matrix,
+        damping_rhs=damping_rhs,
+        half_intercept_damping_lambda=system.half_intercept_damping_lambda,
+        node_lower_bound_s=system.node_lower_bound_s,
+        node_upper_bound_s=system.node_upper_bound_s,
+        slowness_lower_bound_s_per_m=system.slowness_lower_bound_s_per_m,
+        slowness_upper_bound_s_per_m=system.slowness_upper_bound_s_per_m,
+        initial_bedrock_slowness_s_per_m=system.initial_bedrock_slowness_s_per_m,
     )
 
 
@@ -770,11 +855,20 @@ def _build_damping_system(
 
 def _analyze_design_endpoint_graph(
     design: RefractionStaticDesignMatrix,
+    *,
+    row_used_mask: np.ndarray | None = None,
 ) -> EndpointSumGraphSummary:
+    row_index = (
+        np.arange(design.n_observations, dtype=np.int64)
+        if row_used_mask is None
+        else np.flatnonzero(
+            _coerce_design_row_mask(design, row_used_mask=row_used_mask)
+        )
+    )
     return analyze_endpoint_sum_graph(
         n_nodes=int(design.n_active_nodes),
-        row_source_node_id=design.source_node_col,
-        row_receiver_node_id=design.receiver_node_col,
+        row_source_node_id=design.source_node_col[row_index],
+        row_receiver_node_id=design.receiver_node_col[row_index],
     )
 
 
@@ -806,8 +900,9 @@ def _run_refraction_static_solver(
     summaries: list[RefractionStaticRobustIterationSummary] = []
 
     for iteration_index in range(robust.max_iterations):
-        current_system = _system_with_observation_row_mask(
-            system,
+        current_system = _rebuild_refraction_static_solver_system_for_row_mask(
+            design=design,
+            system=system,
             row_used_mask=current_row_mask,
         )
         raw = _run_lsq_linear(current_system)
@@ -938,8 +1033,9 @@ def _run_refraction_static_solver(
         current_row_mask = proposed_row_mask
     else:
         stop_reason = 'max_iterations'
-        final_system = _system_with_observation_row_mask(
-            system,
+        final_system = _rebuild_refraction_static_solver_system_for_row_mask(
+            design=design,
+            system=system,
             row_used_mask=current_row_mask,
         )
         final_raw = _run_lsq_linear(final_system)
@@ -948,8 +1044,9 @@ def _run_refraction_static_solver(
         raise RefractionStaticSolverError('robust refraction solver produced no result')
 
     if int(np.count_nonzero(current_row_mask)) < design.n_observations:
-        final_system = _system_with_observation_row_mask(
-            system,
+        final_system = _rebuild_refraction_static_solver_system_for_row_mask(
+            design=design,
+            system=system,
             row_used_mask=current_row_mask,
         )
         final_raw = _run_lsq_linear(final_system)
@@ -966,75 +1063,6 @@ def _run_refraction_static_solver(
         stop_reason=stop_reason,
     )
 
-
-def _system_with_observation_row_mask(
-    system: RefractionStaticSolveSystem,
-    *,
-    row_used_mask: np.ndarray,
-) -> RefractionStaticSolveSystem:
-    mask = np.asarray(row_used_mask)
-    if mask.shape != (system.n_observation_rows,):
-        raise RefractionStaticSolverError('robust row mask shape mismatch')
-    if not np.issubdtype(mask.dtype, np.bool_):
-        raise RefractionStaticSolverError('robust row mask must have bool dtype')
-    used_observation_rows = np.flatnonzero(mask).astype(np.int64, copy=False)
-    if used_observation_rows.size == system.n_observation_rows:
-        return system
-    if used_observation_rows.size == 0:
-        raise RefractionStaticSolverError(
-            'robust rejection would drop all observations'
-        )
-    observation_rows = system.augmented_matrix[: system.n_observation_rows]
-    row_weights = sparse.diags(
-        mask.astype(np.float64, copy=False),
-        offsets=0,
-        shape=(system.n_observation_rows, system.n_observation_rows),
-        format='csr',
-    )
-    masked_observation_rows = (row_weights @ observation_rows).tocsr()
-    tail_rows = system.augmented_matrix[
-        system.n_observation_rows : system.n_augmented_rows
-    ]
-    augmented_matrix = sparse.vstack(
-        [masked_observation_rows, tail_rows],
-        format='csr',
-        dtype=np.float64,
-    )
-    augmented_matrix.sort_indices()
-    augmented_rhs = np.ascontiguousarray(system.augmented_rhs_s.copy(), dtype=np.float64)
-    augmented_rhs[: system.n_observation_rows] *= mask.astype(np.float64, copy=False)
-    return RefractionStaticSolveSystem(
-        augmented_matrix=augmented_matrix,
-        augmented_rhs_s=augmented_rhs,
-        lower_bounds=system.lower_bounds,
-        upper_bounds=system.upper_bounds,
-        initial_parameter_vector=system.initial_parameter_vector,
-        n_observation_rows=system.n_observation_rows,
-        n_smoothing_rows=system.n_smoothing_rows,
-        n_damping_rows=system.n_damping_rows,
-        n_gauge_rows=system.n_gauge_rows,
-        n_augmented_rows=int(augmented_matrix.shape[0]),
-        n_parameters=system.n_parameters,
-        component_id_by_node=system.component_id_by_node,
-        n_node_components=system.n_node_components,
-        is_bipartite_by_component=system.is_bipartite_by_component,
-        signed_partition_by_node=system.signed_partition_by_node,
-        gauge_required_by_component=system.gauge_required_by_component,
-        n_bipartite_node_components=system.n_bipartite_node_components,
-        half_intercept_damping_lambda=system.half_intercept_damping_lambda,
-        regularized_parameter_group=system.regularized_parameter_group,
-        regularization_row_count=system.regularization_row_count,
-        node_lower_bound_s=system.node_lower_bound_s,
-        node_upper_bound_s=system.node_upper_bound_s,
-        slowness_lower_bound_s_per_m=system.slowness_lower_bound_s_per_m,
-        slowness_upper_bound_s_per_m=system.slowness_upper_bound_s_per_m,
-        initial_bedrock_slowness_s_per_m=(
-            system.initial_bedrock_slowness_s_per_m
-        ),
-        smoothing_rows=system.smoothing_rows,
-    )
-
-
 def _safe_rejection_rows(
     *,
     design: RefractionStaticDesignMatrix,
@@ -1046,10 +1074,6 @@ def _safe_rejection_rows(
     min_used_observations: int,
 ) -> np.ndarray:
     proposed = np.ascontiguousarray(current_row_mask.copy(), dtype=bool)
-    initial_component_count = _source_receiver_graph_component_count(
-        design,
-        row_used_mask=initial_row_mask,
-    )
     accepted: list[int] = []
     for raw_row in candidate_rows.tolist():
         row = int(raw_row)
@@ -1060,7 +1084,6 @@ def _safe_rejection_rows(
             system=system,
             initial_row_mask=initial_row_mask,
             row_used_mask=trial,
-            initial_source_receiver_component_count=initial_component_count,
             min_used_fraction=min_used_fraction,
             min_used_observations=min_used_observations,
         ):
@@ -1076,7 +1099,6 @@ def _robust_row_mask_is_safe(
     system: RefractionStaticSolveSystem,
     initial_row_mask: np.ndarray,
     row_used_mask: np.ndarray,
-    initial_source_receiver_component_count: int,
     min_used_fraction: float,
     min_used_observations: int,
 ) -> bool:
@@ -1086,30 +1108,44 @@ def _robust_row_mask_is_safe(
     )
     if n_used < max(min_fraction_count, int(min_used_observations)):
         return False
-    if (
-        n_used
-        + system.n_smoothing_rows
-        + system.n_damping_rows
-        + system.n_gauge_rows
-        < system.n_parameters
-    ):
-        return False
     if not _node_coverage_is_safe(design, row_used_mask=row_used_mask):
         return False
-    if (
-        _source_receiver_graph_component_count(
-            design,
-            row_used_mask=row_used_mask,
-        )
-        != int(initial_source_receiver_component_count)
-    ):
-        return False
     if design.bedrock_velocity_mode == 'solve_cell':
-        return _cell_coverage_is_safe(
+        if not _cell_coverage_is_safe(
             design,
             row_used_mask=row_used_mask,
+        ):
+            return False
+    try:
+        candidate_system = _rebuild_refraction_static_solver_system_for_row_mask(
+            design=design,
+            system=system,
+            row_used_mask=row_used_mask,
         )
-    return True
+    except RefractionStaticSolverError:
+        return False
+    if candidate_system.n_augmented_rows < candidate_system.n_parameters:
+        return False
+    return _augmented_system_is_structurally_identifiable(candidate_system)
+
+
+def _augmented_system_is_structurally_identifiable(
+    system: RefractionStaticSolveSystem,
+) -> bool:
+    matrix = system.augmented_matrix
+    if matrix.shape != (system.n_augmented_rows, system.n_parameters):
+        return False
+    try:
+        _validate_bounds(
+            lower_bounds=system.lower_bounds,
+            upper_bounds=system.upper_bounds,
+        )
+    except RefractionStaticSolverError:
+        return False
+    column_nnz = np.diff(matrix.tocsc().indptr)
+    if np.any(column_nnz == 0):
+        return False
+    return bool(int(structural_rank(matrix)) == int(system.n_parameters))
 
 
 def _node_coverage_is_safe(
@@ -1620,6 +1656,8 @@ def _build_solver_qc(
         cell_observation_count=cell_observation_count,
         row_used_mask=robust_result.row_used_mask,
     )
+    initial_graph = _analyze_design_endpoint_graph(design)
+    initial_gauge_rows = int(np.count_nonzero(initial_graph.gauge_required_by_component))
     qc = {
         'method': 'gli_variable_thickness',
         'bedrock_velocity_mode': design.bedrock_velocity_mode,
@@ -1627,6 +1665,9 @@ def _build_solver_qc(
         'bedrock_slowness_s_per_m': _json_finite_float(bedrock_slowness_s_per_m),
         'bedrock_velocity_status': bedrock_velocity_status,
         'n_observations': int(design.n_observations),
+        'n_observation_rows': int(system.n_observation_rows),
+        'n_initial_observation_rows': int(design.n_observations),
+        'n_final_observation_rows': int(system.n_observation_rows),
         'n_initial_used_observations': int(design.n_observations),
         'n_final_used_observations': int(
             np.count_nonzero(robust_result.row_used_mask)
@@ -1634,13 +1675,27 @@ def _build_solver_qc(
         'n_rejected_observations': int(
             design.n_observations - np.count_nonzero(robust_result.row_used_mask)
         ),
+        'n_initial_rejected_observations': 0,
+        'n_final_rejected_observations': int(
+            design.n_observations - np.count_nonzero(robust_result.row_used_mask)
+        ),
         'n_parameters': int(design.n_parameters),
         'n_augmented_rows': int(system.n_augmented_rows),
         'n_smoothing_rows': int(system.n_smoothing_rows),
         'n_damping_rows': int(system.n_damping_rows),
         'n_gauge_rows': int(system.n_gauge_rows),
+        'n_initial_gauge_rows': initial_gauge_rows,
+        'n_final_gauge_rows': int(system.n_gauge_rows),
         'n_node_components': int(system.n_node_components),
+        'n_initial_node_components': int(initial_graph.n_components),
+        'n_final_node_components': int(system.n_node_components),
         'n_bipartite_node_components': int(system.n_bipartite_node_components),
+        'n_initial_bipartite_node_components': int(
+            np.count_nonzero(initial_graph.is_bipartite_by_component)
+        ),
+        'n_final_bipartite_node_components': int(
+            system.n_bipartite_node_components
+        ),
         'n_gauge_required_node_components': int(
             np.count_nonzero(system.gauge_required_by_component)
         ),

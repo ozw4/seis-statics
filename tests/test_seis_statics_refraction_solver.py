@@ -404,24 +404,28 @@ def test_refraction_solver_robust_global_rejects_outlier_and_recovers_solution()
         result.rejected_iteration_sorted,
         [-1, -1, -1, -1, -1, 0],
     )
-    assert result.system.n_observation_rows == design.n_observations
+    assert result.system.n_observation_rows == 5
     assert result.system.n_augmented_rows == (
-        design.n_observations
+        result.system.n_observation_rows
         + result.system.n_smoothing_rows
         + result.system.n_damping_rows
         + result.system.n_gauge_rows
     )
     observation_block = result.system.augmented_matrix[
-        : design.n_observations
-    ].toarray()
-    np.testing.assert_allclose(observation_block[:5], design.matrix[:5].toarray())
-    np.testing.assert_allclose(observation_block[5], 0.0)
-    np.testing.assert_allclose(result.system.augmented_rhs_s[:5], design.rhs_s[:5])
-    assert result.system.augmented_rhs_s[5] == 0.0
+        : result.system.n_observation_rows
+    ].tocsr()
+    np.testing.assert_allclose(observation_block.toarray(), design.matrix[:5].toarray())
+    np.testing.assert_allclose(
+        result.system.augmented_rhs_s[: result.system.n_observation_rows],
+        design.rhs_s[:5],
+    )
+    assert np.all(np.diff(observation_block.indptr) > 0)
     assert len(result.robust_iteration_summaries) == 2
     assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 1
     assert result.qc['robust_iteration_count'] == 2
     assert result.qc['n_final_used_observations'] == 5
+    assert result.qc['n_observation_rows'] == 5
+    assert result.qc['n_final_observation_rows'] == 5
     np.testing.assert_array_equal(result.node_observation_count, [3, 2, 3, 2])
     assert result.qc['design_matrix']['node_observation_count'] == [3, 2, 3, 2]
     assert result.bedrock_velocity_m_s == pytest.approx(2500.0, abs=1.0e-6)
@@ -566,7 +570,7 @@ def test_refraction_solver_robust_safe_rejection_deduplicates_same_node_rows() -
     np.testing.assert_array_equal(result.node_observation_count, [2])
 
 
-def test_refraction_solver_robust_safe_rejection_preserves_graph_connectivity() -> None:
+def test_refraction_solver_robust_rejection_allows_identifiable_graph_split() -> None:
     fixed_velocity = 2500.0
     source_node_id = np.asarray([10, 10, 20, 20, 20], dtype=np.int64)
     receiver_node_id = np.asarray([30, 30, 40, 40, 30], dtype=np.int64)
@@ -623,10 +627,82 @@ def test_refraction_solver_robust_safe_rejection_preserves_graph_connectivity() 
         ),
     )
 
+    assert result.robust_stop_reason == 'zero_scale'
+    assert result.n_rejected_observations == 1
+    np.testing.assert_array_equal(
+        result.used_observation_mask_sorted,
+        [True, True, True, True, False],
+    )
+    assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 1
+    assert result.system.n_observation_rows == 4
+    assert result.system.n_node_components == 2
+    assert result.system.n_gauge_rows == 2
+    assert result.qc['n_initial_node_components'] == 1
+    assert result.qc['n_final_node_components'] == 2
+    assert result.qc['n_initial_gauge_rows'] == 1
+    assert result.qc['n_final_gauge_rows'] == 2
+
+
+def test_refraction_solver_robust_rejection_refuses_bridge_losing_node_coverage() -> None:
+    fixed_velocity = 2500.0
+    source_node_id = np.asarray([10, 10, 20], dtype=np.int64)
+    receiver_node_id = np.asarray([30, 30, 30], dtype=np.int64)
+    distance_m = np.asarray([500.0, 600.0, 700.0], dtype=np.float64)
+    true_t1_by_node = {
+        10: 0.02,
+        20: 0.04,
+        30: 0.03,
+    }
+    pick_time = np.asarray(
+        [
+            true_t1_by_node[int(src)]
+            + true_t1_by_node[int(rec)]
+            + dist / fixed_velocity
+            for src, rec, dist in zip(
+                source_node_id,
+                receiver_node_id,
+                distance_m,
+                strict=True,
+            )
+        ],
+        dtype=np.float64,
+    )
+    pick_time[2] += 1.0
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(3, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=1,
+        n_traces=3,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(
+            min_picks_per_node=1,
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=1.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            ),
+        ),
+    )
+
     assert result.robust_stop_reason == 'safe_rejection'
     assert result.n_rejected_observations == 0
-    np.testing.assert_array_equal(result.used_observation_mask_sorted, valid_mask)
-    assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 0
+    np.testing.assert_array_equal(result.used_observation_mask_sorted, [True] * 3)
+    np.testing.assert_array_equal(result.node_observation_count, [2, 1, 3])
+    assert result.system.n_node_components == 1
 
 
 def test_refraction_solver_rejects_mismatched_design_model_modes() -> None:
