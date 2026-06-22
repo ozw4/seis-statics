@@ -25,3 +25,22 @@ FastAPI/Pydantic schemas, job runtime, artifact writing, and UI assertions.
 | refraction datum and field composition | `tests/test_seis_statics_refraction_datum.py`, `tests/test_seis_statics_refraction_field_composition.py`, `tests/test_seis_statics_refraction_manual_static.py`, `tests/test_seis_statics_refraction_source_depth.py`, `tests/test_seis_statics_refraction_uphole.py` | Preserves datum/elevation shifts, source-depth/up-hole/manual static composition, final trace-shift sign, and invalid-status handling. |
 | refraction multi-layer conversion | `tests/test_seis_statics_refraction_multilayer_solver.py`, `tests/test_seis_statics_refraction_multilayer_conversion.py` | Preserves `v2_t1`, `v3_t2`, and `vsub_t3` time-term solves, layer velocity order checks, local V2 projection, and datum conversion outputs. |
 | residual and trace-shift compatibility | `tests/test_seis_statics_residual_design_matrix.py`, `tests/test_seis_statics_residual_sparse_solver.py`, `tests/test_seis_statics_residual_robust_solver.py`, `tests/test_seis_statics_trace_shift.py` | Preserves pre-existing source/receiver residual and trace application contracts used alongside time-term/refraction statics. |
+
+## Migrated Source Test Mapping
+
+The following mappings cover the `seisviewer2d` tests explicitly named for the
+Issue 021-023 migration batch. Source-side artifact, request, runtime, and UI
+assertions were intentionally excluded; the listed package tests retain the
+portable numerical and dataclass contracts.
+
+| Source test named in issue | Migrated package coverage | Notes |
+| --- | --- | --- |
+| `test_refraction_static_datum.py` | `tests/test_seis_statics_refraction_datum.py`, `tests/test_seis_statics_refraction_field_composition.py`, `tests/test_seis_statics_refraction_manual_static.py`, `tests/test_seis_statics_refraction_source_depth.py`, `tests/test_seis_statics_refraction_uphole.py` | Covers pure datum scalar/array math, floating/flat modes, field composition, source-depth, up-hole, and manual-static portions without artifact I/O. |
+| `test_refraction_static_multilayer_orchestration.py` | `tests/test_seis_statics_refraction_multilayer_solver.py` | Covers enabled-layer dispatch, combined trace arrays, layer identity, rejection reasons, and QC summaries. |
+| `test_refraction_static_multilayer_v3_t2_solver.py` | `tests/test_seis_statics_refraction_multilayer_solver.py` | Covers `v3_t2` global solve recovery and layer-index/result metadata. |
+| `test_refraction_static_multilayer_vsub_t3_solver.py` | `tests/test_seis_statics_refraction_multilayer_solver.py` | Covers `vsub_t3` fixed/global recovery and combined result propagation. |
+| `test_refraction_static_multilayer_cell_layers.py` | `tests/test_seis_statics_refraction_multilayer_solver.py`, `tests/test_seis_statics_refraction_multilayer_conversion.py` | Covers solve-cell V2 projection, cell velocity statuses, and low-fold propagation. |
+| `test_refraction_static_multilayer_2layer_e2e.py` | `tests/test_seis_statics_refraction_multilayer_conversion.py`, `tests/test_seis_statics_refraction_t1lsst_multilayer.py` | Covers 2-layer T1LSST conversion arrays, weathering correction, and datum facade outputs. |
+| `test_refraction_static_multilayer_3layer_composition.py` | `tests/test_seis_statics_refraction_multilayer_conversion.py`, `tests/test_seis_statics_refraction_t1lsst_multilayer.py` | Covers 3-layer thickness/status composition, replacement velocity selection, and final datum shift composition. |
+| `test_refraction_static_multilayer_3layer_e2e.py` | `tests/test_seis_statics_refraction_multilayer_conversion.py`, `tests/test_seis_statics_refraction_t1lsst_multilayer.py` | Covers numerical 3-layer solve-to-conversion flow and flat datum final shifts. |
+| `test_refraction_static_multilayer_types.py` | `tests/test_seis_statics_refraction_types.py`, `tests/test_seis_statics_refraction_options.py`, `tests/test_seis_statics_refraction_layer_config.py`, `tests/test_seis_statics_refraction_multilayer_conversion.py` | Covers application-free dataclasses, option validation, normalized layer config, and multilayer result dataclasses. |

@@ -253,6 +253,45 @@ def test_package_root_stays_light_and_exports_no_eager_public_api() -> None:
     assert package.__all__ == []
 
 
+def test_lightweight_imports_do_not_load_scipy_heavy_modules() -> None:
+    script = """
+import importlib
+import sys
+
+package = importlib.import_module('seis_statics')
+assert package.__all__ == []
+assert 'scipy' not in sys.modules
+assert 'seis_statics.refraction.solver' not in sys.modules
+assert 'seis_statics.refraction.design_matrix' not in sys.modules
+
+refraction = importlib.import_module('seis_statics.refraction')
+assert 'RefractionStaticModelOptions' in refraction.__all__
+assert 'scipy' not in sys.modules
+assert 'seis_statics.refraction.solver' not in sys.modules
+assert 'seis_statics.refraction.design_matrix' not in sys.modules
+
+status = importlib.import_module('seis_statics.refraction.status')
+assert callable(status.classify_refraction_endpoint_static_status)
+assert 'scipy' not in sys.modules
+assert 'seis_statics.refraction.solver' not in sys.modules
+assert 'seis_statics.refraction.design_matrix' not in sys.modules
+"""
+    env = os.environ.copy()
+    env['PYTHONPATH'] = (
+        str(REPO_ROOT / 'src')
+        if not env.get('PYTHONPATH')
+        else f"{REPO_ROOT / 'src'}{os.pathsep}{env['PYTHONPATH']}"
+    )
+    subprocess.run(
+        [sys.executable, '-c', script],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_time_term_public_api_is_pinned() -> None:
     _assert_public_api('seis_statics.time_term', EXPECTED_TIME_TERM_PUBLIC_API)
 
@@ -269,12 +308,25 @@ def test_distribution_version_is_release_handoff_minor() -> None:
 
 def test_parity_manifest_records_migrated_test_mapping() -> None:
     text = PARITY_MANIFEST.read_text(encoding='utf-8')
+    migrated_sources = (
+        'test_refraction_static_datum.py',
+        'test_refraction_static_multilayer_orchestration.py',
+        'test_refraction_static_multilayer_v3_t2_solver.py',
+        'test_refraction_static_multilayer_vsub_t3_solver.py',
+        'test_refraction_static_multilayer_cell_layers.py',
+        'test_refraction_static_multilayer_2layer_e2e.py',
+        'test_refraction_static_multilayer_3layer_composition.py',
+        'test_refraction_static_multilayer_3layer_e2e.py',
+        'test_refraction_static_multilayer_types.py',
+    )
 
     assert 'Canonical source' in text
     assert 'time-term' in text
     assert 'refraction' in text
     assert 'tests/test_seis_statics_time_term_sparse_solver.py' in text
     assert 'tests/test_seis_statics_refraction_cell_solver.py' in text
+    for source_test in migrated_sources:
+        assert f'`{source_test}`' in text
 
 
 def test_wheel_install_smoke_without_application_dependencies(tmp_path: Path) -> None:

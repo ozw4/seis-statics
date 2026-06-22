@@ -471,8 +471,9 @@ def _combine_layer_results(
 
         layer_rejected = layer_candidate & ~layer_used
         rejected |= layer_rejected
-        reason_fill = layer_rejected & (reason == '')
+        reason_fill = layer_rejected & ~used & (reason == '')
         reason[reason_fill] = layer_result.rejection_reason_sorted[reason_fill]
+        layer_kind[reason_fill] = layer_result.layer_kind
 
     rejected &= ~used
     reason[used] = ''

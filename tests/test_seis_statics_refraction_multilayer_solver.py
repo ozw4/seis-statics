@@ -201,6 +201,8 @@ def test_multilayer_solver_preserves_layer_and_robust_rejection_reasons() -> Non
 
     assert result.rejection_reason_sorted[0] == 'bad_pick'
     assert result.rejection_reason_sorted[-1] == 'robust_rejected'
+    assert result.layer_kind_sorted[0] == 'v2_t1'
+    assert result.layer_kind_sorted[-1] == 'v3_t2'
     assert result.rejected_observation_mask_sorted[0]
     assert result.rejected_observation_mask_sorted[-1]
     assert result.qc['n_rejected_observations'] == 2
