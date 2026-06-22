@@ -475,6 +475,15 @@ def _layer_rejection_reason(
         layer_masks.layer_rejection_reason_sorted[layer.kind],
         dtype='<U64',
     ).copy()
+    design_reason = solve_result.design.rejection_reason_sorted
+    if design_reason is not None:
+        design_reason = np.asarray(design_reason, dtype='<U64')
+        if design_reason.shape != reason.shape:
+            raise RefractionMultilayerTimeTermSolverError(
+                'solve_result.design.rejection_reason_sorted shape mismatch'
+            )
+        design_rejected = (design_reason != '') & (design_reason != 'ok')
+        reason[design_rejected] = design_reason[design_rejected]
     robust_rejected = solve_result.rejected_observation_mask_sorted
     reason[robust_rejected] = ROBUST_REJECTION_REASON
     invalid_velocity = (

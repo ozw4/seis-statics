@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 
 from seis_statics.refraction import (
+    LOW_FOLD_CELL_REJECTION_REASON,
+    LOW_FOLD_NODE_REJECTION_REASON,
     RefractionEndpointTable,
     RefractionStaticFirstLayerOptions,
     RefractionStaticInputModel,
@@ -229,6 +231,133 @@ def test_multilayer_solver_preserves_layer_and_robust_rejection_reasons() -> Non
     assert result.rejected_observation_mask_sorted[0]
     assert result.rejected_observation_mask_sorted[-1]
     assert result.qc['n_rejected_observations'] == 2
+
+
+def test_multilayer_solver_preserves_low_fold_design_rejection_reasons() -> None:
+    good_pairs = [
+        (10, 20),
+        (10, 21),
+        (10, 22),
+        (11, 20),
+        (11, 21),
+        (11, 22),
+        (12, 20),
+        (12, 21),
+        (12, 22),
+    ]
+    rows: list[tuple[int, int, float, float]] = []
+    for index, (src, rec) in enumerate(good_pairs):
+        distance = 50.0 + float(index)
+        rows.append((src, rec, distance, 0.01 + 0.02 + distance / 2500.0))
+    low_fold_index = len(rows)
+    rows.append((12, 23, 75.0, 0.01 + 0.02 + 75.0 / 2500.0))
+    for index, (src, rec) in enumerate(good_pairs):
+        distance = 150.0 + float(index)
+        rows.append((src, rec, distance, 0.01 + 0.02 + distance / 3500.0))
+    input_model = _input_model_from_rows(rows)
+    model = _three_layer_model(
+        RefractionStaticLayerOptions(
+            kind='v2_t1',
+            min_offset_m=0.0,
+            max_offset_m=100.0,
+            velocity_mode='fixed_global',
+            fixed_velocity_m_s=2500.0,
+        ),
+        RefractionStaticLayerOptions(
+            kind='v3_t2',
+            min_offset_m=100.0,
+            max_offset_m=None,
+            velocity_mode='fixed_global',
+            fixed_velocity_m_s=3500.0,
+        ),
+    )
+    solver_options = replace(_solver_options(), min_picks_per_node=3)
+
+    result = solve_refraction_multilayer_time_terms(
+        input_model=input_model,
+        model=model,
+        solver_options=solver_options,
+    )
+
+    assert result.rejected_observation_mask_sorted[low_fold_index]
+    assert (
+        result.rejection_reason_sorted[low_fold_index]
+        == LOW_FOLD_NODE_REJECTION_REASON
+    )
+    assert result.layer_kind_sorted[low_fold_index] == 'v2_t1'
+    layer = result.layer_result_by_kind['v2_t1']
+    assert (
+        layer.rejection_reason_sorted[low_fold_index]
+        == LOW_FOLD_NODE_REJECTION_REASON
+    )
+
+
+def test_multilayer_solver_preserves_low_fold_cell_design_rejection_reasons() -> None:
+    source_node_id = np.asarray([10, 11], dtype=np.int64)
+    receiver_node_id = np.asarray([20, 21], dtype=np.int64)
+    source_t = {10: 0.010, 11: 0.012}
+    receiver_t = {20: 0.020, 21: 0.022, 22: 0.024}
+    rows: list[tuple[int, int, float, float, float, float]] = []
+    for src_index, src in enumerate(source_node_id):
+        for rec_index, rec in enumerate(receiver_node_id):
+            for cell_index, (cell_velocity, src_x, rec_x) in enumerate(
+                ((2200.0, 0.0, 20.0), (2800.0, 80.0, 100.0))
+            ):
+                distance = 50.0 + float(src_index * 4 + rec_index * 2 + cell_index)
+                pick = source_t[int(src)] + receiver_t[int(rec)] + distance / cell_velocity
+                rows.append((int(src), int(rec), distance, pick, src_x, rec_x))
+    low_fold_index = len(rows)
+    rows.append((10, 22, 75.0, source_t[10] + receiver_t[22] + 75.0 / 2500.0, 130.0, 150.0))
+    for src_index, src in enumerate(source_node_id):
+        for rec_index, rec in enumerate(receiver_node_id):
+            for cell_index, (src_x, rec_x) in enumerate(((0.0, 20.0), (80.0, 100.0))):
+                distance = 150.0 + float(src_index * 4 + rec_index * 2 + cell_index)
+                pick = source_t[int(src)] + receiver_t[int(rec)] + distance / 3500.0
+                rows.append((int(src), int(rec), distance, pick, src_x, rec_x))
+    input_model = _input_model_from_rows_with_coordinates(rows)
+    model = _three_layer_model(
+        RefractionStaticLayerOptions(
+            kind='v2_t1',
+            min_offset_m=0.0,
+            max_offset_m=100.0,
+            velocity_mode='solve_cell',
+            initial_velocity_m_s=2500.0,
+            min_velocity_m_s=1600.0,
+            max_velocity_m_s=3200.0,
+            min_observations_per_cell=3,
+        ),
+        RefractionStaticLayerOptions(
+            kind='v3_t2',
+            min_offset_m=100.0,
+            max_offset_m=None,
+            velocity_mode='fixed_global',
+            fixed_velocity_m_s=3500.0,
+        ),
+        refractor_cell=RefractionStaticRefractorCellOptions(
+            number_of_cell_x=3,
+            size_of_cell_x_m=50.0,
+            x_coordinate_origin_m=0.0,
+            min_observations_per_cell=3,
+        ),
+    )
+
+    result = solve_refraction_multilayer_time_terms(
+        input_model=input_model,
+        model=model,
+        solver_options=_solver_options(),
+    )
+
+    assert result.rejected_observation_mask_sorted[low_fold_index]
+    assert (
+        result.rejection_reason_sorted[low_fold_index]
+        == LOW_FOLD_CELL_REJECTION_REASON
+    )
+    assert result.layer_kind_sorted[low_fold_index] == 'v2_t1'
+    layer = result.layer_result_by_kind['v2_t1']
+    assert (
+        layer.rejection_reason_sorted[low_fold_index]
+        == LOW_FOLD_CELL_REJECTION_REASON
+    )
 
 
 def test_multilayer_solver_projects_cell_velocity_to_deeper_layer_rows() -> None:

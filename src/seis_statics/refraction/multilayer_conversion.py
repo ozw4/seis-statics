@@ -863,7 +863,24 @@ def _resolve_floating_datum(
             receiver_elevation_m=conversion.receiver_endpoint.surface_elevation_m,
         )
     if mode == 'smoothed_topography':
-        window = 1 if options.smoothing_window_nodes is None else options.smoothing_window_nodes
+        if options.smoothing_radius_m is not None:
+            return ResolvedFloatingDatum(
+                source_elevation_m=_smooth_endpoint_topography_by_radius(
+                    conversion.source_endpoint,
+                    radius_m=options.smoothing_radius_m,
+                    method=options.smoothing_method,
+                ),
+                receiver_elevation_m=_smooth_endpoint_topography_by_radius(
+                    conversion.receiver_endpoint,
+                    radius_m=options.smoothing_radius_m,
+                    method=options.smoothing_method,
+                ),
+            )
+        window = (
+            1
+            if options.smoothing_window_nodes is None
+            else options.smoothing_window_nodes
+        )
         return ResolvedFloatingDatum(
             source_elevation_m=_smooth_endpoint_topography(
                 conversion.source_endpoint,
@@ -895,6 +912,62 @@ def _smooth_endpoint_topography(
     )
     out = np.empty_like(smoothed)
     out[order] = smoothed
+    return np.ascontiguousarray(out, dtype=np.float64)
+
+
+def _smooth_endpoint_topography_by_radius(
+    endpoint: RefractionMultilayerEndpointConversion,
+    *,
+    radius_m: float,
+    method: Literal['moving_average', 'median'],
+) -> np.ndarray:
+    order = _endpoint_topography_order(endpoint)
+    x = np.asarray(endpoint.x_m[order], dtype=np.float64)
+    y = np.asarray(endpoint.y_m[order], dtype=np.float64)
+    if not (np.all(np.isfinite(x)) and np.all(np.isfinite(y))):
+        raise RefractionMultilayerConversionError(
+            'endpoint coordinates must be finite for radius smoothing'
+        )
+    if x.size <= 1:
+        return np.ascontiguousarray(endpoint.surface_elevation_m.copy(), dtype=np.float64)
+
+    step_m = np.hypot(np.diff(x), np.diff(y))
+    distance_m = np.concatenate(
+        (
+            np.asarray([0.0], dtype=np.float64),
+            np.cumsum(step_m, dtype=np.float64),
+        )
+    )
+    smoothed = _smooth_topography_by_distance_radius(
+        endpoint.surface_elevation_m[order],
+        distance_m=distance_m,
+        radius_m=radius_m,
+        method=method,
+    )
+    out = np.empty_like(smoothed)
+    out[order] = smoothed
+    return np.ascontiguousarray(out, dtype=np.float64)
+
+
+def _smooth_topography_by_distance_radius(
+    elevation_m: np.ndarray,
+    *,
+    distance_m: np.ndarray,
+    radius_m: float,
+    method: Literal['moving_average', 'median'],
+) -> np.ndarray:
+    values = np.asarray(elevation_m, dtype=np.float64)
+    radius = float(radius_m)
+    out = np.full(values.shape, np.nan, dtype=np.float64)
+    for index, center_m in enumerate(distance_m.tolist()):
+        sample_mask = np.abs(distance_m - float(center_m)) <= radius
+        sample = values[sample_mask & np.isfinite(values)]
+        if sample.size == 0:
+            continue
+        if method == 'moving_average':
+            out[index] = float(np.mean(sample))
+        else:
+            out[index] = float(np.median(sample))
     return np.ascontiguousarray(out, dtype=np.float64)
 
 

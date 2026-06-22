@@ -248,6 +248,42 @@ def test_multilayer_datum_facade_smooths_topography_in_node_order() -> None:
     )
 
 
+def test_multilayer_datum_facade_smooths_topography_by_radius() -> None:
+    node_elevation_m = np.asarray([100.0, 130.0, 70.0, 110.0, 90.0], dtype=np.float64)
+    input_model = _with_node_elevation(
+        _input_model(layer_count=3),
+        node_elevation_m,
+    )
+    datum_options = RefractionStaticDatumOptions(
+        mode='floating_only',
+        floating_datum_mode='smoothed_topography',
+        smoothing_radius_m=1.0,
+        smoothing_window_nodes=11,
+    )
+
+    result = compute_refraction_multilayer_datum_statics_from_input_model(
+        input_model=input_model,
+        model=_model(layer_count=3),
+        datum_options=datum_options,
+        solver_options=_solver_options(),
+    )
+
+    np.testing.assert_allclose(
+        _values_by_node(
+            result.conversion.source_endpoint.node_id,
+            result.datum.source_endpoint_datum.floating_datum_elevation_m,
+        ),
+        np.asarray([115.0, 100.0, 310.0 / 3.0, 90.0], dtype=np.float64),
+    )
+    np.testing.assert_allclose(
+        _values_by_node(
+            result.conversion.receiver_endpoint.node_id,
+            result.datum.receiver_endpoint_datum.floating_datum_elevation_m,
+        ),
+        np.asarray([115.0, 100.0, 310.0 / 3.0, 90.0, 100.0], dtype=np.float64),
+    )
+
+
 def test_multilayer_datum_facade_uses_endpoint_replacement_velocities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
