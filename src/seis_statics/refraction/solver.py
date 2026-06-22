@@ -19,7 +19,6 @@ from seis_statics._validation import (
 from seis_statics._endpoint_sum_graph import (
     EndpointSumGraphSummary,
     analyze_endpoint_sum_graph,
-    build_endpoint_sum_gauge_matrix,
 )
 from seis_statics.refraction.cell_regularization import (
     CellSlownessSmoothingRows,
@@ -93,6 +92,7 @@ class RefractionStaticSolveSystem:
     signed_partition_by_node: np.ndarray
     gauge_required_by_component: np.ndarray
     n_bipartite_node_components: int
+    gauge_resolution: str
 
     half_intercept_damping_lambda: float
     regularized_parameter_group: str
@@ -213,7 +213,7 @@ def build_refraction_static_solver_system(
     solver_options: RefractionStaticSolverOptions | None = None,
     row_used_mask: np.ndarray | None = None,
 ) -> RefractionStaticSolveSystem:
-    """Build observation, damping, gauge, bounds, and initial vector."""
+    """Build observation, damping, bounds, and initial vector."""
     options = validate_refraction_static_solver_options(solver_options)
     _validate_design(design)
     _validate_model_for_design(model=model, design=design)
@@ -308,12 +308,13 @@ def _build_refraction_static_solver_system_from_parts(
     observation_matrix = design.matrix[used_rows].tocsr()
     observation_rhs = np.ascontiguousarray(design.rhs_s[used_rows], dtype=np.float64)
     graph = _analyze_design_endpoint_graph(design, row_used_mask=mask)
-    gauge_matrix = build_endpoint_sum_gauge_matrix(
-        graph=graph,
-        n_columns=n_parameters,
-        gauge_weight=1.0,
+    n_gauge_required_components = int(
+        np.count_nonzero(graph.gauge_required_by_component)
     )
-    gauge_rhs = np.zeros(gauge_matrix.shape[0], dtype=np.float64)
+    gauge_resolution = _gauge_resolution_for_system(
+        half_intercept_damping_lambda=half_intercept_damping_lambda,
+        n_gauge_required_components=n_gauge_required_components,
+    )
     smoothing_matrix = (
         smoothing_rows.matrix if smoothing_rows is not None else _empty_rows(n_parameters)
     )
@@ -330,7 +331,7 @@ def _build_refraction_static_solver_system_from_parts(
         physical_matrix,
         mode=design.bedrock_velocity_mode,
         n_parameters=n_parameters,
-        gauge_nullity=int(np.count_nonzero(graph.gauge_required_by_component)),
+        gauge_nullity=n_gauge_required_components,
         rtol=float(identifiability_rtol),
     )
 
@@ -339,7 +340,6 @@ def _build_refraction_static_solver_system_from_parts(
             observation_matrix,
             smoothing_matrix,
             damping_matrix,
-            gauge_matrix,
         ],
         format='csr',
         dtype=np.float64,
@@ -351,7 +351,6 @@ def _build_refraction_static_solver_system_from_parts(
                 observation_rhs,
                 smoothing_rhs,
                 damping_rhs,
-                gauge_rhs,
             ]
         ),
         dtype=np.float64,
@@ -377,7 +376,7 @@ def _build_refraction_static_solver_system_from_parts(
         n_observation_rows=int(used_rows.size),
         n_smoothing_rows=0 if smoothing_rows is None else smoothing_rows.n_rows,
         n_damping_rows=int(damping_matrix.shape[0]),
-        n_gauge_rows=int(gauge_matrix.shape[0]),
+        n_gauge_rows=0,
         n_augmented_rows=n_augmented_rows,
         n_parameters=n_parameters,
         component_id_by_node=graph.component_id_by_node,
@@ -388,6 +387,7 @@ def _build_refraction_static_solver_system_from_parts(
         n_bipartite_node_components=int(
             np.count_nonzero(graph.is_bipartite_by_component)
         ),
+        gauge_resolution=gauge_resolution,
         half_intercept_damping_lambda=float(half_intercept_damping_lambda),
         regularized_parameter_group='node_half_intercept_time_s',
         regularization_row_count=int(damping_matrix.shape[0]),
@@ -476,8 +476,18 @@ def solve_refraction_static_design_least_squares(
     raw = robust_result.raw_result
     final_system = robust_result.system
     row_used_mask = robust_result.row_used_mask
-    parameter_vector = np.ascontiguousarray(raw.x, dtype=np.float64)
+    raw_parameter_vector = np.ascontiguousarray(raw.x, dtype=np.float64)
+    parameter_vector = _canonicalize_refraction_parameter_vector(
+        raw_parameter_vector,
+        system=final_system,
+        design=design,
+    )
     _validate_finite(parameter_vector, name='parameter_vector')
+    active_mask = _active_mask_for_parameter_vector(
+        parameter_vector,
+        lower_bounds=final_system.lower_bounds,
+        upper_bounds=final_system.upper_bounds,
+    )
 
     row_modeled = _row_modeled_pick_time(
         design,
@@ -503,13 +513,13 @@ def solve_refraction_static_design_least_squares(
     node_id, node_t1, node_status = _assemble_node_solution(
         design,
         parameter_vector=parameter_vector,
-        active_mask=raw.active_mask,
+        active_mask=active_mask,
         system=final_system,
     )
     bedrock_slowness, bedrock_velocity, bedrock_status = _bedrock_solution(
         design,
         parameter_vector=parameter_vector,
-        active_mask=raw.active_mask,
+        active_mask=active_mask,
     )
     node_observation_count = _node_observation_count_for_row_mask(
         design,
@@ -531,7 +541,7 @@ def solve_refraction_static_design_least_squares(
     ) = _cell_solution(
         design,
         parameter_vector=parameter_vector,
-        active_mask=raw.active_mask,
+        active_mask=active_mask,
         cell_observation_count=cell_observation_count,
     )
     rms_s = _rms(row_residual[row_used_mask])
@@ -586,7 +596,7 @@ def solve_refraction_static_design_least_squares(
         solver_cost=float(raw.cost),
         solver_optimality=float(raw.optimality),
         solver_iterations=int(raw.nit),
-        solver_active_mask=np.ascontiguousarray(raw.active_mask, dtype=np.int64),
+        solver_active_mask=active_mask,
         robust_enabled=bool(options.robust.enabled),
         robust_stop_reason=robust_result.stop_reason,
         robust_iteration_summaries=robust_result.iteration_summaries,
@@ -866,6 +876,139 @@ def _build_cell_smoothing_rows_for_design(
 
 def _empty_rows(n_parameters: int) -> sparse.csr_matrix:
     return sparse.csr_matrix((0, n_parameters), dtype=np.float64)
+
+
+def _gauge_resolution_for_system(
+    *,
+    half_intercept_damping_lambda: float,
+    n_gauge_required_components: int,
+) -> str:
+    if n_gauge_required_components <= 0:
+        return 'not_required'
+    if float(half_intercept_damping_lambda) > 0.0:
+        return 'node_damping'
+    return 'postsolve_minimum_norm'
+
+
+def _canonicalize_refraction_parameter_vector(
+    parameter_vector: np.ndarray,
+    *,
+    system: RefractionStaticSolveSystem,
+    design: RefractionStaticDesignMatrix,
+) -> np.ndarray:
+    """Resolve node gauge without changing physical fit or slowness parameters.
+
+    For zero damping, each bipartite node component is shifted only along its
+    known endpoint-sum null direction. The selected shift is the component
+    minimum-L2 solution clipped to the feasible node-bound interval, so
+    observation predictions, smoothing residuals, and slowness values are
+    invariant to numerical tolerance.
+    """
+    vector = np.ascontiguousarray(parameter_vector, dtype=np.float64)
+    if vector.shape != (system.n_parameters,):
+        raise RefractionStaticSolverError('parameter_vector shape mismatch')
+    if system.half_intercept_damping_lambda > 0.0 or not np.any(
+        system.gauge_required_by_component
+    ):
+        _validate_parameter_bounds(vector, system=system)
+        return vector
+
+    before_design = np.ascontiguousarray(design.matrix @ vector, dtype=np.float64)
+    before_smoothing = _smoothing_prediction(system, parameter_vector=vector)
+    before_slowness = np.ascontiguousarray(
+        vector[design.n_active_nodes :],
+        dtype=np.float64,
+    )
+
+    out = vector.copy()
+    component_id = np.asarray(system.component_id_by_node, dtype=np.int64)
+    signed_partition = np.asarray(system.signed_partition_by_node, dtype=np.float64)
+    lower = np.asarray(system.lower_bounds[: design.n_active_nodes], dtype=np.float64)
+    upper = np.asarray(system.upper_bounds[: design.n_active_nodes], dtype=np.float64)
+    for component in np.flatnonzero(system.gauge_required_by_component).tolist():
+        nodes = np.flatnonzero(component_id == int(component)).astype(
+            np.int64,
+            copy=False,
+        )
+        if nodes.size == 0:
+            raise RefractionStaticSolverError('gauge component contains no nodes')
+        g = signed_partition[nodes]
+        if np.any(g == 0.0):
+            raise RefractionStaticSolverError('gauge partition contains zero entries')
+        t = out[nodes]
+        denominator = float(g @ g)
+        if denominator <= 0.0:
+            raise RefractionStaticSolverError('gauge partition has zero norm')
+        unconstrained = -float(g @ t) / denominator
+        c_lower = -np.inf
+        c_upper = np.inf
+        for value, sign, lo, hi in zip(t, g, lower[nodes], upper[nodes], strict=True):
+            if sign > 0.0:
+                node_lower = float(lo - value)
+                node_upper = float(hi - value)
+            else:
+                node_lower = float(value - hi)
+                node_upper = float(value - lo)
+            c_lower = max(c_lower, node_lower)
+            c_upper = min(c_upper, node_upper)
+        if c_lower > c_upper + 1.0e-10:
+            raise RefractionStaticSolverError(
+                'gauge canonicalization feasible interval is empty'
+            )
+        if c_lower > c_upper:
+            chosen = 0.5 * (c_lower + c_upper)
+        else:
+            chosen = min(max(unconstrained, c_lower), c_upper)
+        out[nodes] = t + chosen * g
+
+    _validate_parameter_bounds(out, system=system)
+    if not np.allclose(design.matrix @ out, before_design, rtol=1.0e-9, atol=1.0e-10):
+        raise RefractionStaticSolverError(
+            'gauge canonicalization changed design prediction'
+        )
+    if not np.allclose(
+        _smoothing_prediction(system, parameter_vector=out),
+        before_smoothing,
+        rtol=1.0e-9,
+        atol=1.0e-10,
+    ):
+        raise RefractionStaticSolverError(
+            'gauge canonicalization changed smoothing prediction'
+        )
+    if not np.array_equal(out[design.n_active_nodes :], before_slowness):
+        raise RefractionStaticSolverError(
+            'gauge canonicalization changed slowness parameters'
+        )
+    return np.ascontiguousarray(out, dtype=np.float64)
+
+
+def _smoothing_prediction(
+    system: RefractionStaticSolveSystem,
+    *,
+    parameter_vector: np.ndarray,
+) -> np.ndarray:
+    if system.smoothing_rows is None:
+        return np.empty(0, dtype=np.float64)
+    return np.ascontiguousarray(
+        system.smoothing_rows.matrix @ parameter_vector,
+        dtype=np.float64,
+    )
+
+
+def _validate_parameter_bounds(
+    parameter_vector: np.ndarray,
+    *,
+    system: RefractionStaticSolveSystem,
+) -> None:
+    lower_violation = parameter_vector < system.lower_bounds - 1.0e-9
+    finite_upper = np.isfinite(system.upper_bounds)
+    upper_violation = finite_upper & (
+        parameter_vector > system.upper_bounds + 1.0e-9
+    )
+    if np.any(lower_violation) or np.any(upper_violation):
+        raise RefractionStaticSolverError(
+            'canonical parameter vector violates solver bounds'
+        )
 
 
 _DENSE_IDENTIFIABILITY_MAX_ELEMENTS = 1_000_000
@@ -1824,6 +1967,22 @@ def _coerce_active_mask(
     return out
 
 
+def _active_mask_for_parameter_vector(
+    parameter_vector: np.ndarray,
+    *,
+    lower_bounds: np.ndarray,
+    upper_bounds: np.ndarray,
+) -> np.ndarray:
+    active = np.zeros(parameter_vector.shape, dtype=np.int64)
+    active[np.isclose(parameter_vector, lower_bounds, rtol=0.0, atol=1.0e-10)] = -1
+    finite_upper = np.isfinite(upper_bounds)
+    active[
+        finite_upper
+        & np.isclose(parameter_vector, upper_bounds, rtol=0.0, atol=1.0e-10)
+    ] = 1
+    return np.ascontiguousarray(active, dtype=np.int64)
+
+
 def _global_slowness_col(design: RefractionStaticDesignMatrix) -> int:
     col = design.bedrock_slowness_col
     if col is None:
@@ -1888,7 +2047,9 @@ def _build_solver_qc(
         row_used_mask=robust_result.row_used_mask,
     )
     initial_graph = _analyze_design_endpoint_graph(design)
-    initial_gauge_rows = int(np.count_nonzero(initial_graph.gauge_required_by_component))
+    initial_gauge_required_components = int(
+        np.count_nonzero(initial_graph.gauge_required_by_component)
+    )
     qc = {
         'method': 'gli_variable_thickness',
         'bedrock_velocity_mode': design.bedrock_velocity_mode,
@@ -1915,7 +2076,7 @@ def _build_solver_qc(
         'n_smoothing_rows': int(system.n_smoothing_rows),
         'n_damping_rows': int(system.n_damping_rows),
         'n_gauge_rows': int(system.n_gauge_rows),
-        'n_initial_gauge_rows': initial_gauge_rows,
+        'n_initial_gauge_rows': 0,
         'n_final_gauge_rows': int(system.n_gauge_rows),
         'n_node_components': int(system.n_node_components),
         'n_initial_node_components': int(initial_graph.n_components),
@@ -1930,6 +2091,11 @@ def _build_solver_qc(
         'n_gauge_required_node_components': int(
             np.count_nonzero(system.gauge_required_by_component)
         ),
+        'n_initial_gauge_required_node_components': initial_gauge_required_components,
+        'n_final_gauge_required_node_components': int(
+            np.count_nonzero(system.gauge_required_by_component)
+        ),
+        'gauge_resolution': system.gauge_resolution,
         'half_intercept_damping_lambda': float(
             system.half_intercept_damping_lambda
         ),
