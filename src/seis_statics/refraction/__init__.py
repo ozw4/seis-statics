@@ -183,6 +183,18 @@ _BEDROCK_EXPORTS = frozenset(
         'estimate_global_bedrock_slowness_from_input_model',
     }
 )
+_HALF_INTERCEPT_EXPORTS = frozenset(
+    {
+        'RefractionHalfInterceptEndpointResult',
+        'RefractionHalfInterceptError',
+        'RefractionHalfInterceptResult',
+        'build_refraction_half_intercept_design',
+        'build_refraction_half_intercept_result',
+        'build_refraction_half_intercept_result_from_bedrock_result',
+        'estimate_refraction_half_intercept_from_design',
+        'estimate_refraction_half_intercept_from_input_model',
+    }
+)
 
 
 def __getattr__(name: str) -> object:
@@ -202,6 +214,12 @@ def __getattr__(name: str) -> object:
         from seis_statics.refraction import bedrock
 
         value = getattr(bedrock, name)
+        globals()[name] = value
+        return value
+    if name in _HALF_INTERCEPT_EXPORTS:
+        from seis_statics.refraction import half_intercept
+
+        value = getattr(half_intercept, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module 'seis_statics.refraction' has no attribute {name!r}")
@@ -238,6 +256,9 @@ __all__ = [
     'RefractionFieldCompositionError',
     'RefractionFieldInvalidComponentPolicy',
     'RefractionFirstLayerMode',
+    'RefractionHalfInterceptEndpointResult',
+    'RefractionHalfInterceptError',
+    'RefractionHalfInterceptResult',
     'RefractionLayerAssignmentPolicy',
     'RefractionLayerConfig',
     'RefractionLayerConfigLayer',
@@ -298,6 +319,9 @@ __all__ = [
     'build_refraction_layer_observation_masks',
     'build_refraction_cell_grid',
     'build_refraction_design_matrix_node_diagnostics',
+    'build_refraction_half_intercept_design',
+    'build_refraction_half_intercept_result',
+    'build_refraction_half_intercept_result_from_bedrock_result',
     'build_refraction_static_cell_design_matrix',
     'build_refraction_static_design_matrix',
     'build_refraction_static_design_matrix_from_arrays',
@@ -322,6 +346,8 @@ __all__ = [
     'compute_uphole_time_correction_from_result',
     'estimate_global_v1_from_direct_arrivals',
     'estimate_global_bedrock_slowness_from_input_model',
+    'estimate_refraction_half_intercept_from_design',
+    'estimate_refraction_half_intercept_from_input_model',
     'effective_refraction_cell_grid_config',
     'layer_offset_gate_contains',
     'manual_static_inline_rows',
