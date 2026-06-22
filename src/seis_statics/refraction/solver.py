@@ -76,6 +76,7 @@ class RefractionStaticSolveSystem:
 
     augmented_matrix: sparse.csr_matrix
     augmented_rhs_s: np.ndarray
+    observation_matrix: sparse.csr_matrix
     lower_bounds: np.ndarray
     upper_bounds: np.ndarray
     initial_parameter_vector: np.ndarray
@@ -367,6 +368,7 @@ def _build_refraction_static_solver_system_from_parts(
     return RefractionStaticSolveSystem(
         augmented_matrix=augmented_matrix,
         augmented_rhs_s=augmented_rhs,
+        observation_matrix=observation_matrix,
         lower_bounds=np.ascontiguousarray(lower_bounds, dtype=np.float64),
         upper_bounds=np.ascontiguousarray(upper_bounds, dtype=np.float64),
         initial_parameter_vector=np.ascontiguousarray(
@@ -913,7 +915,7 @@ def _canonicalize_refraction_parameter_vector(
         _validate_parameter_bounds(vector, system=system)
         return vector
 
-    before_design = np.ascontiguousarray(design.matrix @ vector, dtype=np.float64)
+    before_observation = _observation_prediction(system, parameter_vector=vector)
     before_smoothing = _smoothing_prediction(system, parameter_vector=vector)
     before_slowness = np.ascontiguousarray(
         vector[design.n_active_nodes :],
@@ -962,9 +964,14 @@ def _canonicalize_refraction_parameter_vector(
         out[nodes] = t + chosen * g
 
     _validate_parameter_bounds(out, system=system)
-    if not np.allclose(design.matrix @ out, before_design, rtol=1.0e-9, atol=1.0e-10):
+    if not np.allclose(
+        _observation_prediction(system, parameter_vector=out),
+        before_observation,
+        rtol=1.0e-9,
+        atol=1.0e-10,
+    ):
         raise RefractionStaticSolverError(
-            'gauge canonicalization changed design prediction'
+            'gauge canonicalization changed observation prediction'
         )
     if not np.allclose(
         _smoothing_prediction(system, parameter_vector=out),
@@ -980,6 +987,17 @@ def _canonicalize_refraction_parameter_vector(
             'gauge canonicalization changed slowness parameters'
         )
     return np.ascontiguousarray(out, dtype=np.float64)
+
+
+def _observation_prediction(
+    system: RefractionStaticSolveSystem,
+    *,
+    parameter_vector: np.ndarray,
+) -> np.ndarray:
+    return np.ascontiguousarray(
+        system.observation_matrix @ parameter_vector,
+        dtype=np.float64,
+    )
 
 
 def _smoothing_prediction(
@@ -1170,13 +1188,25 @@ def _sparse_column_scaled_numerical_rank(
         largest = float(np.max(np.abs(largest_values)))
         threshold = float(rtol) * largest
         if expected_rank == 0:
-            critical = 0.0
-            estimated_rank = int(largest > threshold)
+            if min_dim == 1:
+                critical = largest
+                estimated_rank = int(largest > threshold)
+            else:
+                singular_values = _sparse_singular_values_for_rank_diagnostic(
+                    scaled_matrix,
+                    largest=largest,
+                    name='physical_matrix sparse diagnostic singular values',
+                )
+                critical = 0.0
+                estimated_rank = int(np.count_nonzero(singular_values > threshold))
         else:
             critical_index = min_dim - int(expected_rank)
             if critical_index < 0:
                 critical = 0.0
                 estimated_rank = min_dim
+            elif min_dim == 1:
+                critical = largest
+                estimated_rank = int(largest > threshold)
             else:
                 k_small = critical_index + 1
                 if k_small >= min_dim:
@@ -1184,27 +1214,24 @@ def _sparse_column_scaled_numerical_rank(
                         'sparse physical identifiability requires too many '
                         'singular values for the sparse path'
                     )
-                try:
-                    small_values = sparse_linalg.svds(
-                        scaled_matrix,
-                        k=k_small,
-                        which='SM',
-                        return_singular_vectors=False,
-                    )
-                except Exception as exc:
-                    raise RefractionStaticSolverError(
-                        'sparse physical identifiability smallest singular values '
-                        'did not converge'
-                    ) from exc
-                small_values = np.sort(np.asarray(small_values, dtype=np.float64))
-                _validate_finite(small_values, name='physical_matrix sparse singular values')
-                critical = float(small_values[critical_index])
-                estimated_nullity = (n_columns - min_dim) + int(
-                    np.count_nonzero(small_values <= threshold)
+                small_values = _sparse_smallest_singular_values(
+                    scaled_matrix,
+                    k=k_small,
+                    name='physical_matrix sparse singular values',
                 )
-                estimated_rank = int(n_columns - estimated_nullity)
+                critical = float(small_values[critical_index])
                 if critical > threshold:
                     estimated_rank = int(expected_rank)
+                else:
+                    singular_values = _sparse_singular_values_for_rank_diagnostic(
+                        scaled_matrix,
+                        largest=largest,
+                        name='physical_matrix sparse diagnostic singular values',
+                    )
+                    critical = float(singular_values[critical_index])
+                    estimated_rank = int(
+                        np.count_nonzero(singular_values > threshold)
+                    )
     return _NumericalRankDiagnostic(
         method='sparse_svds',
         n_rows=n_rows,
@@ -1218,6 +1245,48 @@ def _sparse_column_scaled_numerical_rank(
         largest_singular_value=float(largest),
         rtol=float(rtol),
     )
+
+
+def _sparse_singular_values_for_rank_diagnostic(
+    scaled_matrix: sparse.csr_matrix,
+    *,
+    largest: float,
+    name: str,
+) -> np.ndarray:
+    min_dim = min(map(int, scaled_matrix.shape))
+    if min_dim <= 1:
+        out = np.asarray([largest], dtype=np.float64)
+    else:
+        small_values = _sparse_smallest_singular_values(
+            scaled_matrix,
+            k=min_dim - 1,
+            name=name,
+        )
+        out = np.sort(np.concatenate((small_values, np.asarray([largest]))))
+    _validate_finite(out, name=name)
+    return out
+
+
+def _sparse_smallest_singular_values(
+    scaled_matrix: sparse.csr_matrix,
+    *,
+    k: int,
+    name: str,
+) -> np.ndarray:
+    try:
+        values = sparse_linalg.svds(
+            scaled_matrix,
+            k=int(k),
+            which='SM',
+            return_singular_vectors=False,
+        )
+    except Exception as exc:
+        raise RefractionStaticSolverError(
+            'sparse physical identifiability smallest singular values did not converge'
+        ) from exc
+    out = np.sort(np.asarray(values, dtype=np.float64))
+    _validate_finite(out, name=name)
+    return out
 
 
 def _build_damping_system(

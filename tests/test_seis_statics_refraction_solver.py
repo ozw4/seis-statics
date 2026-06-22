@@ -323,6 +323,42 @@ def test_refraction_solver_large_sparse_skinny_rank_uses_sparse_path(
     assert seen_shape == [(512, 2000)]
 
 
+def test_refraction_solver_sparse_rank_failure_reports_diagnostic_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def fake_svds(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        which: str,
+        return_singular_vectors: bool,
+    ) -> np.ndarray:
+        assert return_singular_vectors is False
+        calls.append((which, int(k)))
+        if which == 'LM':
+            return np.asarray([1.0], dtype=np.float64)
+        if int(k) == 1:
+            return np.asarray([0.0], dtype=np.float64)
+        if int(k) == 5:
+            return np.asarray([0.0, 0.0, 1.0, 1.0, 1.0], dtype=np.float64)
+        raise AssertionError(f'unexpected svds request for shape {scaled_matrix.shape}')
+
+    monkeypatch.setattr(solver_module.sparse_linalg, 'svds', fake_svds)
+
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        sparse.eye(6, format='csr', dtype=np.float64),
+        expected_rank=6,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.estimated_rank == 4
+    assert diagnostic.critical_singular_value == 0.0
+    assert calls == [('LM', 1), ('SM', 1), ('SM', 5)]
+
+
 def test_refraction_solver_system_gauge_rows_are_conceptual_not_matrix_rows() -> None:
     design = build_refraction_static_design_matrix_from_arrays(
         pick_time_s_sorted=np.asarray([0.30, 0.40], dtype=np.float64),
@@ -481,6 +517,41 @@ def test_refraction_solver_canonicalizes_disconnected_components_independently()
 
     np.testing.assert_allclose(design.matrix @ after, design.matrix @ before)
     np.testing.assert_allclose(after, [0.05, 0.05, 0.04, 0.04], atol=1.0e-12)
+    assert np.count_nonzero(system.gauge_required_by_component) == 2
+
+
+def test_refraction_solver_canonicalization_checks_final_observation_rows() -> None:
+    fixed_velocity = 2500.0
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=np.asarray([0.30, 0.28, 0.32], dtype=np.float64),
+        valid_observation_mask_sorted=np.ones(3, dtype=bool),
+        source_node_id_sorted=np.asarray([10, 20, 20], dtype=np.int64),
+        receiver_node_id_sorted=np.asarray([30, 40, 30], dtype=np.int64),
+        distance_m_sorted=np.asarray([500.0, 500.0, 500.0], dtype=np.float64),
+        node_id=np.asarray([10, 20, 30, 40], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=1,
+        n_traces=3,
+    )
+    final_row_mask = np.asarray([True, True, False], dtype=bool)
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(min_picks_per_node=1),
+        row_used_mask=final_row_mask,
+    )
+    before = np.asarray([0.10, 0.0, 0.0, 0.08], dtype=np.float64)
+
+    after = solver_module._canonicalize_refraction_parameter_vector(
+        before,
+        system=system,
+        design=design,
+    )
+
+    np.testing.assert_allclose(system.observation_matrix @ after, system.observation_matrix @ before)
+    np.testing.assert_allclose(after, [0.05, 0.04, 0.05, 0.04], atol=1.0e-12)
+    assert not np.allclose(design.matrix @ after, design.matrix @ before)
     assert np.count_nonzero(system.gauge_required_by_component) == 2
 
 
