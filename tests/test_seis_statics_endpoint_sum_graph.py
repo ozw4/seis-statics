@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from seis_statics._endpoint_sum_graph import (
+    _build_endpoint_sum_prediction_identifiable_mask,
     analyze_endpoint_sum_graph,
     build_endpoint_sum_gauge_matrix,
 )
@@ -109,3 +110,71 @@ def test_endpoint_sum_graph_gauge_is_deterministic_for_edge_order() -> None:
         first.signed_partition_by_node,
         second.signed_partition_by_node,
     )
+
+
+def test_endpoint_sum_prediction_invalid_across_disconnected_bipartite_components() -> None:
+    graph = analyze_endpoint_sum_graph(
+        n_nodes=4,
+        row_source_node_id=np.asarray([0, 2], dtype=np.int64),
+        row_receiver_node_id=np.asarray([1, 3], dtype=np.int64),
+    )
+
+    mask = _build_endpoint_sum_prediction_identifiable_mask(
+        graph=graph,
+        source_node_id=np.asarray([0], dtype=np.int64),
+        receiver_node_id=np.asarray([3], dtype=np.int64),
+        node_supported_mask=np.ones(4, dtype=bool),
+    )
+
+    np.testing.assert_array_equal(mask, [False])
+
+
+def test_endpoint_sum_prediction_uses_bipartite_signed_partition() -> None:
+    graph = analyze_endpoint_sum_graph(
+        n_nodes=3,
+        row_source_node_id=np.asarray([0, 1], dtype=np.int64),
+        row_receiver_node_id=np.asarray([1, 2], dtype=np.int64),
+    )
+
+    mask = _build_endpoint_sum_prediction_identifiable_mask(
+        graph=graph,
+        source_node_id=np.asarray([0, 0], dtype=np.int64),
+        receiver_node_id=np.asarray([1, 2], dtype=np.int64),
+        node_supported_mask=np.ones(3, dtype=bool),
+    )
+
+    np.testing.assert_array_equal(mask, [True, False])
+
+
+def test_endpoint_sum_prediction_valid_across_full_rank_nonbipartite_components() -> None:
+    graph = analyze_endpoint_sum_graph(
+        n_nodes=6,
+        row_source_node_id=np.asarray([0, 1, 2, 3, 4, 5], dtype=np.int64),
+        row_receiver_node_id=np.asarray([1, 2, 0, 4, 5, 3], dtype=np.int64),
+    )
+
+    mask = _build_endpoint_sum_prediction_identifiable_mask(
+        graph=graph,
+        source_node_id=np.asarray([0], dtype=np.int64),
+        receiver_node_id=np.asarray([3], dtype=np.int64),
+        node_supported_mask=np.ones(6, dtype=bool),
+    )
+
+    np.testing.assert_array_equal(mask, [True])
+
+
+def test_endpoint_sum_prediction_invalid_when_endpoint_unsupported() -> None:
+    graph = analyze_endpoint_sum_graph(
+        n_nodes=3,
+        row_source_node_id=np.asarray([0, 1], dtype=np.int64),
+        row_receiver_node_id=np.asarray([1, 2], dtype=np.int64),
+    )
+
+    mask = _build_endpoint_sum_prediction_identifiable_mask(
+        graph=graph,
+        source_node_id=np.asarray([0], dtype=np.int64),
+        receiver_node_id=np.asarray([1], dtype=np.int64),
+        node_supported_mask=np.asarray([True, False, True], dtype=bool),
+    )
+
+    np.testing.assert_array_equal(mask, [False])

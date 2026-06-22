@@ -43,6 +43,7 @@ from seis_statics.time_term.types import (
 )
 from seis_statics.time_term.sparse_solver import (
     TimeTermGaugeMode,
+    TimeTermGaugeResolution,
     TimeTermSolverSystem,
     TimeTermSparseSolverName,
     TimeTermSparseSolverOptions,
@@ -62,6 +63,7 @@ __all__ = [
     'TimeTermDesignMatrix',
     'TimeTermDesignMatrixOptions',
     'TimeTermGaugeMode',
+    'TimeTermGaugeResolution',
     'TimeTermAppliedShiftResult',
     'TimeTermInversionInputs',
     'TimeTermMoveoutConfig',

@@ -78,6 +78,9 @@ class TimeTermRobustSolveResult:
     n_initial_used_traces: int
     n_final_used_traces: int
     n_rejected_total: int
+    n_endpoint_supported_traces: int
+    n_prediction_identifiable_traces: int
+    n_endpoint_supported_prediction_invalid_due_to_gauge_traces: int
     n_prediction_valid_traces: int
     n_fit_unused_prediction_valid_traces: int
     n_unsupported_endpoint_traces: int
@@ -340,6 +343,13 @@ def summarize_time_term_robust_solver_result(
             'n_initial_fit_used_traces': int(result.n_initial_used_traces),
             'n_fit_used_traces': int(result.n_final_used_traces),
             'n_robust_rejected_traces': int(result.n_rejected_total),
+            'n_endpoint_supported_traces': int(result.n_endpoint_supported_traces),
+            'n_prediction_identifiable_traces': int(
+                result.n_prediction_identifiable_traces
+            ),
+            'n_endpoint_supported_prediction_invalid_due_to_gauge_traces': int(
+                result.n_endpoint_supported_prediction_invalid_due_to_gauge_traces
+            ),
             'n_prediction_valid_traces': int(result.n_prediction_valid_traces),
             'n_fit_unused_prediction_valid_traces': int(
                 result.n_fit_unused_prediction_valid_traces
@@ -373,6 +383,10 @@ def _build_robust_result(
         final_solver_result.system.endpoint_supported_trace_mask_sorted,
         dtype=bool,
     )
+    endpoint_identifiable_mask = np.ascontiguousarray(
+        final_solver_result.system.endpoint_identifiable_trace_mask_sorted,
+        dtype=bool,
+    )
     rejected_mask = np.ascontiguousarray(initial_used_mask & ~final_used_mask, dtype=bool)
     return TimeTermRobustSolveResult(
         initial_solver_result=initial_solver_result,
@@ -394,6 +408,13 @@ def _build_robust_result(
         n_initial_used_traces=int(np.count_nonzero(initial_used_mask)),
         n_final_used_traces=int(np.count_nonzero(final_used_mask)),
         n_rejected_total=int(np.count_nonzero(rejected_mask)),
+        n_endpoint_supported_traces=int(np.count_nonzero(endpoint_supported_mask)),
+        n_prediction_identifiable_traces=int(
+            np.count_nonzero(endpoint_identifiable_mask)
+        ),
+        n_endpoint_supported_prediction_invalid_due_to_gauge_traces=int(
+            np.count_nonzero(endpoint_supported_mask & ~endpoint_identifiable_mask)
+        ),
         n_prediction_valid_traces=int(np.count_nonzero(prediction_mask)),
         n_fit_unused_prediction_valid_traces=int(
             np.count_nonzero(~final_used_mask & prediction_mask)

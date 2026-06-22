@@ -23,6 +23,7 @@ from seis_statics._validation import (
 )
 from seis_statics._endpoint_sum_graph import (
     EndpointSumGraphSummary,
+    _build_endpoint_sum_prediction_identifiable_mask,
     analyze_endpoint_sum_graph,
     build_endpoint_sum_gauge_matrix,
 )
@@ -37,6 +38,11 @@ TimeTermGaugeMode = Literal[
     'auto_component',
     'none',
 ]
+TimeTermGaugeResolution = Literal[
+    'tikhonov_prior',
+    'component_signed_rows',
+    'already_full_rank',
+]
 TimeTermSparseSolverName = Literal['lsmr', 'lsqr']
 TimeTermTracePredictionPolicy = Literal['all_supported', 'fit_used_only']
 
@@ -48,6 +54,8 @@ class TimeTermSparseSolverOptions:
     ``damping_lambda`` is the objective-level Tikhonov coefficient in
     ``||A x - b||^2 + lambda ||x - damping_prior_s||^2``. Augmented damping
     rows therefore use ``sqrt(damping_lambda)`` as their coefficient.
+    When ``damping_lambda > 0``, the Tikhonov prior uniquely resolves node
+    parameters and no additional zero-gauge penalty rows are added.
     """
 
     damping_lambda: float = 0.01
@@ -84,6 +92,7 @@ class TimeTermSolverSystem:
 
     damping_prior_s: np.ndarray
     gauge_mode: TimeTermGaugeMode
+    gauge_resolution: TimeTermGaugeResolution
     component_id_by_node: np.ndarray
     n_components: int
     is_bipartite_by_component: np.ndarray
@@ -96,6 +105,7 @@ class TimeTermSolverSystem:
     min_total_observations_per_node: int
     total_observation_count_by_node: np.ndarray
     endpoint_supported_trace_mask_sorted: np.ndarray
+    endpoint_identifiable_trace_mask_sorted: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -106,8 +116,9 @@ class TimeTermSparseSolverResult:
     define where the final node model may be applied.
     ``prediction_valid_trace_mask_sorted`` marks traces eligible for final
     model application under the selected trace prediction policy. The
-    ``all_supported`` policy uses endpoint support from final used
-    observations; ``fit_used_only`` uses the final fit mask exactly.
+    ``all_supported`` policy uses traces whose endpoints are supported by final
+    used observations and whose endpoint sum is invariant over the final graph
+    null space; ``fit_used_only`` uses the final fit mask exactly.
     """
 
     node_time_term_s: np.ndarray
@@ -306,6 +317,11 @@ def summarize_time_term_sparse_solver_result(
         name='endpoint_supported_trace_mask_sorted',
         expected_shape=used_mask.shape,
     )
+    endpoint_identifiable_mask = _coerce_1d_bool_array(
+        system.endpoint_identifiable_trace_mask_sorted,
+        name='endpoint_identifiable_trace_mask_sorted',
+        expected_shape=used_mask.shape,
+    )
 
     return {
         'n_nodes': int(system.n_nodes),
@@ -314,6 +330,7 @@ def summarize_time_term_sparse_solver_result(
         'n_damping_rows': int(system.n_damping_rows),
         'n_gauge_rows': int(system.n_gauge_rows),
         'gauge_mode': system.gauge_mode,
+        'gauge_resolution': system.gauge_resolution,
         'damping_lambda': _json_float(system.damping_lambda),
         'solver_name': result.solver_name,
         'solver_istop': int(result.solver_istop),
@@ -357,6 +374,13 @@ def summarize_time_term_sparse_solver_result(
         ),
         'n_fit_used_traces': int(np.count_nonzero(used_mask)),
         'n_robust_rejected_traces': 0,
+        'n_endpoint_supported_traces': int(np.count_nonzero(endpoint_supported_mask)),
+        'n_prediction_identifiable_traces': int(
+            np.count_nonzero(endpoint_identifiable_mask)
+        ),
+        'n_endpoint_supported_prediction_invalid_due_to_gauge_traces': int(
+            np.count_nonzero(endpoint_supported_mask & ~endpoint_identifiable_mask)
+        ),
         'n_prediction_valid_traces': int(np.count_nonzero(prediction_mask)),
         'n_fit_unused_prediction_valid_traces': int(
             np.count_nonzero(~used_mask & prediction_mask)
@@ -389,18 +413,38 @@ def _build_gauge_matrix(
     gauge: TimeTermGaugeMode,
     gauge_weight: float,
 ) -> sparse.csr_matrix:
+    n_nodes = int(graph.component_id_by_node.shape[0])
     if gauge == 'none':
-        return sparse.csr_matrix(
-            (0, int(graph.component_id_by_node.shape[0])),
-            dtype=np.float64,
-        )
+        return _empty_gauge_matrix(n_nodes)
     if gauge != 'auto_component':
         raise ValueError(f'unsupported gauge: {gauge!r}')
+    if not np.any(graph.gauge_required_by_component):
+        return _empty_gauge_matrix(n_nodes)
+    if gauge_weight <= 0.0:
+        raise ValueError(
+            'gauge_weight must be greater than 0 when gauge rows are required'
+        )
     return build_endpoint_sum_gauge_matrix(
         graph=graph,
-        n_columns=int(graph.component_id_by_node.shape[0]),
+        n_columns=n_nodes,
         gauge_weight=gauge_weight,
     )
+
+
+def _empty_gauge_matrix(n_nodes: int) -> sparse.csr_matrix:
+    return sparse.csr_matrix((0, n_nodes), dtype=np.float64)
+
+
+def _resolve_gauge_resolution(
+    *,
+    graph: EndpointSumGraphSummary,
+    options: TimeTermSparseSolverOptions,
+) -> TimeTermGaugeResolution:
+    if options.damping_lambda > 0.0:
+        return 'tikhonov_prior'
+    if np.any(graph.gauge_required_by_component):
+        return 'component_signed_rows'
+    return 'already_full_rank'
 
 
 def _build_time_term_solver_system(
@@ -438,11 +482,18 @@ def _build_time_term_solver_system(
         damping_lambda=validated_options.damping_lambda,
         damping_prior_s=damping_prior,
     )
-    gauge_matrix = _build_gauge_matrix(
+    gauge_resolution = _resolve_gauge_resolution(
         graph=graph,
-        gauge=validated_options.gauge,
-        gauge_weight=validated_options.gauge_weight,
+        options=validated_options,
     )
+    if gauge_resolution == 'tikhonov_prior':
+        gauge_matrix = _empty_gauge_matrix(validated_design.n_nodes)
+    else:
+        gauge_matrix = _build_gauge_matrix(
+            graph=graph,
+            gauge=validated_options.gauge,
+            gauge_weight=validated_options.gauge_weight,
+        )
     gauge_data = np.zeros(gauge_matrix.shape[0], dtype=np.float64)
 
     augmented_matrix = sparse.vstack(
@@ -473,6 +524,7 @@ def _build_time_term_solver_system(
         n_nodes=validated_design.n_nodes,
         damping_prior_s=damping_prior,
         gauge_mode=validated_options.gauge,
+        gauge_resolution=gauge_resolution,
         component_id_by_node=graph.component_id_by_node,
         n_components=graph.n_components,
         is_bipartite_by_component=graph.is_bipartite_by_component,
@@ -490,6 +542,13 @@ def _build_time_term_solver_system(
         endpoint_supported_trace_mask_sorted=_build_endpoint_supported_trace_mask(
             validated_design,
             options=validated_options,
+        ),
+        endpoint_identifiable_trace_mask_sorted=(
+            _build_endpoint_identifiable_trace_mask(
+                validated_design,
+                options=validated_options,
+                graph=graph,
+            )
         ),
     )
     return system, validated_design, validated_options
@@ -596,10 +655,6 @@ def _validate_options(
     )
     gauge = _validate_gauge_mode(opts.gauge)
     gauge_weight = _coerce_finite_float(opts.gauge_weight, name='gauge_weight')
-    if gauge == 'auto_component' and gauge_weight <= 0.0:
-        raise ValueError(
-            'gauge_weight must be greater than 0 when gauge is auto_component'
-        )
     solver = _validate_solver_name(opts.solver)
 
     return TimeTermSparseSolverOptions(
@@ -649,7 +704,30 @@ def _build_trace_prediction_valid_mask(
             dtype=bool,
         )
 
-    return _build_endpoint_supported_trace_mask(design, options=options)
+    graph = analyze_endpoint_sum_graph(
+        n_nodes=design.n_nodes,
+        row_source_node_id=design.row_source_node_id,
+        row_receiver_node_id=design.row_receiver_node_id,
+    )
+    return _build_endpoint_identifiable_trace_mask(
+        design,
+        options=options,
+        graph=graph,
+    )
+
+
+def _build_endpoint_identifiable_trace_mask(
+    design: _ValidatedTimeTermDesign,
+    *,
+    options: TimeTermSparseSolverOptions,
+    graph: EndpointSumGraphSummary,
+) -> np.ndarray:
+    return _build_endpoint_sum_prediction_identifiable_mask(
+        graph=graph,
+        source_node_id=design.source_node_id_sorted,
+        receiver_node_id=design.receiver_node_id_sorted,
+        node_supported_mask=_build_node_supported_mask(design, options=options),
+    )
 
 
 def _build_endpoint_supported_trace_mask(
@@ -657,16 +735,24 @@ def _build_endpoint_supported_trace_mask(
     *,
     options: TimeTermSparseSolverOptions,
 ) -> np.ndarray:
-    support_threshold = max(1, int(options.min_total_observations_per_node))
-    node_supported = np.ascontiguousarray(
-        design.total_observation_count_by_node >= support_threshold,
-        dtype=bool,
-    )
+    node_supported = _build_node_supported_mask(design, options=options)
     endpoint_supported = (
         node_supported[design.source_node_id_sorted]
         & node_supported[design.receiver_node_id_sorted]
     )
     return np.ascontiguousarray(endpoint_supported, dtype=bool)
+
+
+def _build_node_supported_mask(
+    design: _ValidatedTimeTermDesign,
+    *,
+    options: TimeTermSparseSolverOptions,
+) -> np.ndarray:
+    support_threshold = max(1, int(options.min_total_observations_per_node))
+    return np.ascontiguousarray(
+        design.total_observation_count_by_node >= support_threshold,
+        dtype=bool,
+    )
 
 
 def _validate_design(design: TimeTermDesignMatrix) -> _ValidatedTimeTermDesign:
@@ -994,6 +1080,7 @@ def _solver_message(solver: TimeTermSparseSolverName, istop: int) -> str:
 
 __all__ = [
     'TimeTermGaugeMode',
+    'TimeTermGaugeResolution',
     'TimeTermSolverSystem',
     'TimeTermSparseSolverName',
     'TimeTermSparseSolverOptions',

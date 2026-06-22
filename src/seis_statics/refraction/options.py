@@ -438,6 +438,7 @@ class RefractionStaticSolverOptions:
     half_intercept_damping_lambda: float = 0.01
     min_picks_per_node: int = 1
     max_abs_half_intercept_time_ms: float = 500.0
+    identifiability_rtol: float = 1.0e-10
     robust: RefractionStaticRobustOptions = field(default_factory=RefractionStaticRobustOptions)
 
     def __post_init__(self) -> None:
@@ -448,6 +449,7 @@ class RefractionStaticSolverOptions:
         )
         _set_positive_int(self, 'min_picks_per_node', 'solver.min_picks_per_node')
         _set_positive_float(self, 'max_abs_half_intercept_time_ms', 'solver.max_abs_half_intercept_time_ms')
+        _set_positive_float(self, 'identifiability_rtol', 'solver.identifiability_rtol')
 
 
 @dataclass(frozen=True)
