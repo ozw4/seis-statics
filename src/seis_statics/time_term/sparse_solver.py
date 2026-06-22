@@ -43,7 +43,12 @@ TimeTermTracePredictionPolicy = Literal['all_supported', 'fit_used_only']
 
 @dataclass(frozen=True)
 class TimeTermSparseSolverOptions:
-    """Options for fitting node terms and selecting trace prediction coverage."""
+    """Options for fitting node terms and selecting trace prediction coverage.
+
+    ``damping_lambda`` is the objective-level Tikhonov coefficient in
+    ``||A x - b||^2 + lambda ||x - damping_prior_s||^2``. Augmented damping
+    rows therefore use ``sqrt(damping_lambda)`` as their coefficient.
+    """
 
     damping_lambda: float = 0.01
     damping_prior_s: float | np.ndarray = 0.0
@@ -164,7 +169,7 @@ def build_time_term_solver_system(
     *,
     options: TimeTermSparseSolverOptions | None = None,
 ) -> TimeTermSolverSystem:
-    """Build observation, damping, and gauge rows as one CSR system."""
+    """Build the objective ``||A x - b||^2 + lambda ||x - prior||^2``."""
     system, _, _ = _build_time_term_solver_system(design, options=options)
     return system
 
@@ -501,14 +506,15 @@ def _build_damping_system(
             sparse.csr_matrix((0, n_nodes), dtype=np.float64),
             np.empty(0, dtype=np.float64),
         )
+    damping_weight = float(np.sqrt(damping_lambda))
     damping_matrix = sparse.eye(
         n_nodes,
         n_nodes,
         format='csr',
         dtype=np.float64,
-    ) * damping_lambda
+    ) * damping_weight
     damping_data = np.ascontiguousarray(
-        damping_lambda * damping_prior_s,
+        damping_weight * damping_prior_s,
         dtype=np.float64,
     )
     return damping_matrix, damping_data

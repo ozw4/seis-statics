@@ -16,7 +16,7 @@ from seis_statics.refraction import (
 
 def _solver_options(**overrides: object) -> RefractionStaticSolverOptions:
     values: dict[str, object] = {
-        'damping': 0.0,
+        'half_intercept_damping_lambda': 0.0,
         'max_abs_half_intercept_time_ms': 100.0,
         'robust': RefractionStaticRobustOptions(enabled=False),
     }
@@ -154,6 +154,114 @@ def test_refraction_solver_system_gauge_adds_row_per_bipartite_component() -> No
         ],
     )
     assert np.linalg.matrix_rank(node_block) == design.n_active_nodes
+
+
+def test_refraction_solver_global_damping_regularizes_only_half_intercepts() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='solve_global',
+        n_traces=6,
+    )
+    damping_lambda = 4.0
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(half_intercept_damping_lambda=damping_lambda),
+    )
+
+    damping_slice = slice(
+        system.n_observation_rows,
+        system.n_observation_rows + system.n_damping_rows,
+    )
+    damping_block = system.augmented_matrix[damping_slice].toarray()
+    parameter_vector = np.asarray(
+        [0.02, -0.01, 0.04, 0.03, 1.0 / 2200.0],
+        dtype=np.float64,
+    )
+    damping_residual = (
+        system.augmented_matrix[damping_slice] @ parameter_vector
+        - system.augmented_rhs_s[damping_slice]
+    )
+
+    assert system.n_damping_rows == design.n_active_nodes
+    assert system.regularization_row_count == design.n_active_nodes
+    assert system.regularized_parameter_group == 'node_half_intercept_time_s'
+    assert system.half_intercept_damping_lambda == damping_lambda
+    np.testing.assert_allclose(
+        damping_block[:, : design.n_active_nodes],
+        np.eye(design.n_active_nodes, dtype=np.float64) * 2.0,
+    )
+    np.testing.assert_allclose(damping_block[:, design.n_active_nodes :], 0.0)
+    np.testing.assert_allclose(system.augmented_rhs_s[damping_slice], 0.0)
+    np.testing.assert_allclose(
+        float(damping_residual @ damping_residual),
+        damping_lambda * float(np.sum(parameter_vector[: design.n_active_nodes] ** 2)),
+    )
+
+
+def test_refraction_solver_zero_lambda_adds_no_damping_rows() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='solve_global',
+        n_traces=6,
+    )
+
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(half_intercept_damping_lambda=0.0),
+    )
+
+    assert system.n_damping_rows == 0
+    assert system.regularization_row_count == 0
+
+
+def test_refraction_solver_fixed_global_damping_scope_is_half_intercepts() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(half_intercept_damping_lambda=9.0),
+    )
+
+    damping_slice = slice(
+        system.n_observation_rows,
+        system.n_observation_rows + system.n_damping_rows,
+    )
+    np.testing.assert_allclose(
+        system.augmented_matrix[damping_slice].toarray(),
+        np.eye(design.n_active_nodes, dtype=np.float64) * 3.0,
+    )
 
 
 def test_refraction_solver_fixed_global_uses_fixed_velocity_distance_term() -> None:

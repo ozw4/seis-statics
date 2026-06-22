@@ -76,7 +76,9 @@ class RefractionStaticSolveSystem:
     gauge_required_by_component: np.ndarray
     n_bipartite_node_components: int
 
-    damping: float
+    half_intercept_damping_lambda: float
+    regularized_parameter_group: str
+    regularization_row_count: int
     node_lower_bound_s: float
     node_upper_bound_s: float
     slowness_lower_bound_s_per_m: float | None
@@ -231,8 +233,8 @@ def build_refraction_static_solver_system(
 
     damping_matrix, damping_rhs = _build_damping_system(
         n_parameters=n_parameters,
-        damping=options.damping,
-        initial_parameter_vector=initial,
+        n_active_nodes=design.n_active_nodes,
+        half_intercept_damping_lambda=options.half_intercept_damping_lambda,
     )
     graph = _analyze_design_endpoint_graph(design)
     gauge_matrix = build_endpoint_sum_gauge_matrix(
@@ -297,7 +299,9 @@ def build_refraction_static_solver_system(
         n_bipartite_node_components=int(
             np.count_nonzero(graph.is_bipartite_by_component)
         ),
-        damping=options.damping,
+        half_intercept_damping_lambda=options.half_intercept_damping_lambda,
+        regularized_parameter_group='node_half_intercept_time_s',
+        regularization_row_count=int(damping_matrix.shape[0]),
         node_lower_bound_s=0.0,
         node_upper_bound_s=float(node_upper),
         slowness_lower_bound_s_per_m=slowness_lower,
@@ -531,9 +535,9 @@ def validate_refraction_static_solver_options(
             'solver.robust.min_used_fraction must be <= 1'
         )
     return RefractionStaticSolverOptions(
-        damping=_coerce_nonnegative_finite_float(
-            opts.damping,
-            name='solver.damping',
+        half_intercept_damping_lambda=_coerce_nonnegative_finite_float(
+            opts.half_intercept_damping_lambda,
+            name='solver.half_intercept_damping_lambda',
             error_type=RefractionStaticSolverError,
         ),
         min_picks_per_node=_coerce_positive_int(
@@ -742,16 +746,25 @@ def _empty_rows(n_parameters: int) -> sparse.csr_matrix:
 def _build_damping_system(
     *,
     n_parameters: int,
-    damping: float,
-    initial_parameter_vector: np.ndarray,
+    n_active_nodes: int,
+    half_intercept_damping_lambda: float,
 ) -> tuple[sparse.csr_matrix, np.ndarray]:
-    if damping == 0.0:
+    if half_intercept_damping_lambda == 0.0:
         return (
             sparse.csr_matrix((0, n_parameters), dtype=np.float64),
             np.empty(0, dtype=np.float64),
         )
-    matrix = sparse.eye(n_parameters, format='csr', dtype=np.float64) * damping
-    rhs = np.ascontiguousarray(damping * initial_parameter_vector, dtype=np.float64)
+    damping_weight = float(np.sqrt(half_intercept_damping_lambda))
+    row_index = np.arange(n_active_nodes, dtype=np.int64)
+    matrix = sparse.csr_matrix(
+        (
+            np.full(n_active_nodes, damping_weight, dtype=np.float64),
+            (row_index, row_index),
+        ),
+        shape=(n_active_nodes, n_parameters),
+        dtype=np.float64,
+    )
+    rhs = np.zeros(n_active_nodes, dtype=np.float64)
     return matrix, rhs
 
 
@@ -1008,7 +1021,9 @@ def _system_with_observation_row_mask(
         signed_partition_by_node=system.signed_partition_by_node,
         gauge_required_by_component=system.gauge_required_by_component,
         n_bipartite_node_components=system.n_bipartite_node_components,
-        damping=system.damping,
+        half_intercept_damping_lambda=system.half_intercept_damping_lambda,
+        regularized_parameter_group=system.regularized_parameter_group,
+        regularization_row_count=system.regularization_row_count,
         node_lower_bound_s=system.node_lower_bound_s,
         node_upper_bound_s=system.node_upper_bound_s,
         slowness_lower_bound_s_per_m=system.slowness_lower_bound_s_per_m,
@@ -1629,7 +1644,11 @@ def _build_solver_qc(
         'n_gauge_required_node_components': int(
             np.count_nonzero(system.gauge_required_by_component)
         ),
-        'damping': float(system.damping),
+        'half_intercept_damping_lambda': float(
+            system.half_intercept_damping_lambda
+        ),
+        'regularized_parameter_group': system.regularized_parameter_group,
+        'regularization_row_count': int(system.regularization_row_count),
         'node_lower_bound_s': float(system.node_lower_bound_s),
         'node_upper_bound_s': float(system.node_upper_bound_s),
         'slowness_lower_bound_s_per_m': _optional_float(

@@ -144,6 +144,15 @@ the event is late. The weathering correction applied to the trace is:
 applied_weathering_shift_s_sorted = -trace_time_term_delay_s_sorted
 ```
 
+The sparse time-term solver defines `damping_lambda` at the objective level:
+
+```text
+min ||A x - b||^2 + damping_lambda ||x - damping_prior_s||^2
+```
+
+Its augmented damping rows therefore use `sqrt(damping_lambda)`, not
+`damping_lambda`, as the row coefficient.
+
 The final trace shift is the sum of already-applied datum and residual shifts
 plus the time-term weathering shift:
 

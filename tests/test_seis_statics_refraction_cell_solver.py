@@ -13,6 +13,7 @@ from seis_statics.refraction import (
     RefractionStaticRobustOptions,
     RefractionStaticSolverOptions,
     build_refraction_static_design_matrix_from_arrays,
+    build_refraction_static_solver_system,
     solve_refraction_static_least_squares,
     solve_refraction_static_design_least_squares,
 )
@@ -20,7 +21,7 @@ from seis_statics.refraction import (
 
 def _solver_options(**overrides: object) -> RefractionStaticSolverOptions:
     values: dict[str, object] = {
-        'damping': 0.0,
+        'half_intercept_damping_lambda': 0.0,
         'max_abs_half_intercept_time_ms': 100.0,
         'robust': RefractionStaticRobustOptions(enabled=False),
     }
@@ -186,6 +187,39 @@ def _cell_design(
     )
 
 
+def test_refraction_cell_solver_damping_regularizes_only_half_intercepts() -> None:
+    design = _cell_design()
+    damping_lambda = 4.0
+    system = build_refraction_static_solver_system(
+        design,
+        model=_cell_model(),
+        solver_options=_solver_options(half_intercept_damping_lambda=damping_lambda),
+    )
+
+    damping_start = system.n_observation_rows + system.n_smoothing_rows
+    damping_slice = slice(damping_start, damping_start + system.n_damping_rows)
+    damping_block = system.augmented_matrix[damping_slice].toarray()
+    parameter_vector = np.asarray(
+        [0.02, -0.01, 0.04, 0.03, 1.0 / 2400.0, 1.0 / 3000.0],
+        dtype=np.float64,
+    )
+    damping_residual = (
+        system.augmented_matrix[damping_slice] @ parameter_vector
+        - system.augmented_rhs_s[damping_slice]
+    )
+
+    assert system.n_damping_rows == design.n_active_nodes
+    np.testing.assert_allclose(
+        damping_block[:, : design.n_active_nodes],
+        np.eye(design.n_active_nodes, dtype=np.float64) * 2.0,
+    )
+    np.testing.assert_allclose(damping_block[:, design.n_active_nodes :], 0.0)
+    np.testing.assert_allclose(
+        float(damping_residual @ damping_residual),
+        damping_lambda * float(np.sum(parameter_vector[: design.n_active_nodes] ** 2)),
+    )
+
+
 def test_refraction_cell_solver_recovers_cell_v2_and_row_midpoint_v2() -> None:
     design = _cell_design()
 
@@ -281,7 +315,7 @@ def test_refraction_cell_solver_marks_low_fold_and_inactive_cells() -> None:
     result = solve_refraction_static_design_least_squares(
         design,
         model=_cell_model(n_cells=4),
-        solver_options=_solver_options(damping=1.0e-8),
+        solver_options=_solver_options(half_intercept_damping_lambda=1.0e-8),
     )
 
     np.testing.assert_array_equal(result.cell_id, [0, 1, 2, 3])
