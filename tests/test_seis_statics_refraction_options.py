@@ -32,7 +32,7 @@ def test_refraction_options_construct_shared_defaults_without_mutable_defaults()
     assert solver_a.robust is not solver_b.robust
 
     with pytest.raises(FrozenInstanceError):
-        solver_a.damping = 1.0  # type: ignore[misc]
+        solver_a.half_intercept_damping_lambda = 1.0  # type: ignore[misc]
 
 
 def test_refraction_first_layer_estimate_requires_direct_offset_gate() -> None:

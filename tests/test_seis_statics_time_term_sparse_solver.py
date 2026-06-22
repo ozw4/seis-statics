@@ -153,7 +153,7 @@ def test_time_term_solver_system_adds_damping_identity_rows() -> None:
 
     np.testing.assert_allclose(
         system.augmented_matrix[4:7].toarray(),
-        np.eye(3, dtype=np.float64) * 0.25,
+        np.eye(3, dtype=np.float64) * 0.5,
     )
     np.testing.assert_allclose(system.augmented_data_s[4:7], np.zeros(3))
 
@@ -169,7 +169,10 @@ def test_time_term_solver_system_uses_scalar_damping_prior() -> None:
     )
 
     np.testing.assert_allclose(system.damping_prior_s, np.full(3, 0.02))
-    np.testing.assert_allclose(system.augmented_data_s[4:7], np.full(3, 0.01))
+    np.testing.assert_allclose(
+        system.augmented_data_s[4:7],
+        np.full(3, np.sqrt(0.5) * 0.02),
+    )
 
 
 def test_time_term_solver_system_uses_array_damping_prior() -> None:
@@ -185,7 +188,36 @@ def test_time_term_solver_system_uses_array_damping_prior() -> None:
     )
 
     np.testing.assert_allclose(system.damping_prior_s, prior)
-    np.testing.assert_allclose(system.augmented_data_s[4:7], 0.5 * prior)
+    np.testing.assert_allclose(system.augmented_data_s[4:7], np.sqrt(0.5) * prior)
+
+
+def test_time_term_solver_damping_residual_matches_objective_penalty() -> None:
+    prior = np.asarray([0.01, -0.02, 0.04], dtype=np.float64)
+    parameter_vector = np.asarray([0.03, -0.01, -0.02], dtype=np.float64)
+    damping_lambda = 0.25
+    system = build_time_term_solver_system(
+        _design(),
+        options=TimeTermSparseSolverOptions(
+            damping_lambda=damping_lambda,
+            damping_prior_s=prior,
+            gauge='none',
+        ),
+    )
+
+    damping_slice = slice(
+        system.n_observation_rows,
+        system.n_observation_rows + system.n_damping_rows,
+    )
+    damping_residual = (
+        system.augmented_matrix[damping_slice] @ parameter_vector
+        - system.augmented_data_s[damping_slice]
+    )
+
+    assert system.n_damping_rows == system.n_nodes
+    np.testing.assert_allclose(
+        float(damping_residual @ damping_residual),
+        damping_lambda * float(np.sum((parameter_vector - prior) ** 2)),
+    )
 
 
 def test_time_term_solver_system_adds_auto_component_signed_gauge_rows() -> None:

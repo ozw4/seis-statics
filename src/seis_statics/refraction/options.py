@@ -428,15 +428,24 @@ class RefractionStaticRobustOptions:
 
 @dataclass(frozen=True)
 class RefractionStaticSolverOptions:
-    """Solver options for refraction static inversion."""
+    """Solver options for refraction static inversion.
 
-    damping: float = 0.01
+    ``half_intercept_damping_lambda`` is the objective-level coefficient in
+    ``lambda ||t_half_intercept||^2``. Augmented damping rows use
+    ``sqrt(lambda)`` and only regularize node half-intercept time columns.
+    """
+
+    half_intercept_damping_lambda: float = 0.01
     min_picks_per_node: int = 1
     max_abs_half_intercept_time_ms: float = 500.0
     robust: RefractionStaticRobustOptions = field(default_factory=RefractionStaticRobustOptions)
 
     def __post_init__(self) -> None:
-        _set_nonnegative_float(self, 'damping', 'solver.damping')
+        _set_nonnegative_float(
+            self,
+            'half_intercept_damping_lambda',
+            'solver.half_intercept_damping_lambda',
+        )
         _set_positive_int(self, 'min_picks_per_node', 'solver.min_picks_per_node')
         _set_positive_float(self, 'max_abs_half_intercept_time_ms', 'solver.max_abs_half_intercept_time_ms')
 

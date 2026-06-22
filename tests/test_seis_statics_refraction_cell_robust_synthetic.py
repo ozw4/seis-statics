@@ -15,7 +15,7 @@ from seis_statics.refraction import (
 
 def _solver_options(**overrides: object) -> RefractionStaticSolverOptions:
     values: dict[str, object] = {
-        'damping': 0.0,
+        'half_intercept_damping_lambda': 0.0,
         'max_abs_half_intercept_time_ms': 100.0,
         'robust': RefractionStaticRobustOptions(enabled=True),
     }

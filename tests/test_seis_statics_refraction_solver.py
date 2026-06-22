@@ -16,7 +16,7 @@ from seis_statics.refraction import (
 
 def _solver_options(**overrides: object) -> RefractionStaticSolverOptions:
     values: dict[str, object] = {
-        'damping': 0.0,
+        'half_intercept_damping_lambda': 0.0,
         'max_abs_half_intercept_time_ms': 100.0,
         'robust': RefractionStaticRobustOptions(enabled=False),
     }
@@ -154,6 +154,114 @@ def test_refraction_solver_system_gauge_adds_row_per_bipartite_component() -> No
         ],
     )
     assert np.linalg.matrix_rank(node_block) == design.n_active_nodes
+
+
+def test_refraction_solver_global_damping_regularizes_only_half_intercepts() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='solve_global',
+        n_traces=6,
+    )
+    damping_lambda = 4.0
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(half_intercept_damping_lambda=damping_lambda),
+    )
+
+    damping_slice = slice(
+        system.n_observation_rows,
+        system.n_observation_rows + system.n_damping_rows,
+    )
+    damping_block = system.augmented_matrix[damping_slice].toarray()
+    parameter_vector = np.asarray(
+        [0.02, -0.01, 0.04, 0.03, 1.0 / 2200.0],
+        dtype=np.float64,
+    )
+    damping_residual = (
+        system.augmented_matrix[damping_slice] @ parameter_vector
+        - system.augmented_rhs_s[damping_slice]
+    )
+
+    assert system.n_damping_rows == design.n_active_nodes
+    assert system.regularization_row_count == design.n_active_nodes
+    assert system.regularized_parameter_group == 'node_half_intercept_time_s'
+    assert system.half_intercept_damping_lambda == damping_lambda
+    np.testing.assert_allclose(
+        damping_block[:, : design.n_active_nodes],
+        np.eye(design.n_active_nodes, dtype=np.float64) * 2.0,
+    )
+    np.testing.assert_allclose(damping_block[:, design.n_active_nodes :], 0.0)
+    np.testing.assert_allclose(system.augmented_rhs_s[damping_slice], 0.0)
+    np.testing.assert_allclose(
+        float(damping_residual @ damping_residual),
+        damping_lambda * float(np.sum(parameter_vector[: design.n_active_nodes] ** 2)),
+    )
+
+
+def test_refraction_solver_zero_lambda_adds_no_damping_rows() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='solve_global',
+        n_traces=6,
+    )
+
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(half_intercept_damping_lambda=0.0),
+    )
+
+    assert system.n_damping_rows == 0
+    assert system.regularization_row_count == 0
+
+
+def test_refraction_solver_fixed_global_damping_scope_is_half_intercepts() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(half_intercept_damping_lambda=9.0),
+    )
+
+    damping_slice = slice(
+        system.n_observation_rows,
+        system.n_observation_rows + system.n_damping_rows,
+    )
+    np.testing.assert_allclose(
+        system.augmented_matrix[damping_slice].toarray(),
+        np.eye(design.n_active_nodes, dtype=np.float64) * 3.0,
+    )
 
 
 def test_refraction_solver_fixed_global_uses_fixed_velocity_distance_term() -> None:
@@ -296,24 +404,28 @@ def test_refraction_solver_robust_global_rejects_outlier_and_recovers_solution()
         result.rejected_iteration_sorted,
         [-1, -1, -1, -1, -1, 0],
     )
-    assert result.system.n_observation_rows == design.n_observations
+    assert result.system.n_observation_rows == 5
     assert result.system.n_augmented_rows == (
-        design.n_observations
+        result.system.n_observation_rows
         + result.system.n_smoothing_rows
         + result.system.n_damping_rows
         + result.system.n_gauge_rows
     )
     observation_block = result.system.augmented_matrix[
-        : design.n_observations
-    ].toarray()
-    np.testing.assert_allclose(observation_block[:5], design.matrix[:5].toarray())
-    np.testing.assert_allclose(observation_block[5], 0.0)
-    np.testing.assert_allclose(result.system.augmented_rhs_s[:5], design.rhs_s[:5])
-    assert result.system.augmented_rhs_s[5] == 0.0
+        : result.system.n_observation_rows
+    ].tocsr()
+    np.testing.assert_allclose(observation_block.toarray(), design.matrix[:5].toarray())
+    np.testing.assert_allclose(
+        result.system.augmented_rhs_s[: result.system.n_observation_rows],
+        design.rhs_s[:5],
+    )
+    assert np.all(np.diff(observation_block.indptr) > 0)
     assert len(result.robust_iteration_summaries) == 2
     assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 1
     assert result.qc['robust_iteration_count'] == 2
     assert result.qc['n_final_used_observations'] == 5
+    assert result.qc['n_observation_rows'] == 5
+    assert result.qc['n_final_observation_rows'] == 5
     np.testing.assert_array_equal(result.node_observation_count, [3, 2, 3, 2])
     assert result.qc['design_matrix']['node_observation_count'] == [3, 2, 3, 2]
     assert result.bedrock_velocity_m_s == pytest.approx(2500.0, abs=1.0e-6)
@@ -458,7 +570,7 @@ def test_refraction_solver_robust_safe_rejection_deduplicates_same_node_rows() -
     np.testing.assert_array_equal(result.node_observation_count, [2])
 
 
-def test_refraction_solver_robust_safe_rejection_preserves_graph_connectivity() -> None:
+def test_refraction_solver_robust_rejection_allows_identifiable_graph_split() -> None:
     fixed_velocity = 2500.0
     source_node_id = np.asarray([10, 10, 20, 20, 20], dtype=np.int64)
     receiver_node_id = np.asarray([30, 30, 40, 40, 30], dtype=np.int64)
@@ -515,10 +627,82 @@ def test_refraction_solver_robust_safe_rejection_preserves_graph_connectivity() 
         ),
     )
 
+    assert result.robust_stop_reason == 'zero_scale'
+    assert result.n_rejected_observations == 1
+    np.testing.assert_array_equal(
+        result.used_observation_mask_sorted,
+        [True, True, True, True, False],
+    )
+    assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 1
+    assert result.system.n_observation_rows == 4
+    assert result.system.n_node_components == 2
+    assert result.system.n_gauge_rows == 2
+    assert result.qc['n_initial_node_components'] == 1
+    assert result.qc['n_final_node_components'] == 2
+    assert result.qc['n_initial_gauge_rows'] == 1
+    assert result.qc['n_final_gauge_rows'] == 2
+
+
+def test_refraction_solver_robust_rejection_refuses_bridge_losing_node_coverage() -> None:
+    fixed_velocity = 2500.0
+    source_node_id = np.asarray([10, 10, 20], dtype=np.int64)
+    receiver_node_id = np.asarray([30, 30, 30], dtype=np.int64)
+    distance_m = np.asarray([500.0, 600.0, 700.0], dtype=np.float64)
+    true_t1_by_node = {
+        10: 0.02,
+        20: 0.04,
+        30: 0.03,
+    }
+    pick_time = np.asarray(
+        [
+            true_t1_by_node[int(src)]
+            + true_t1_by_node[int(rec)]
+            + dist / fixed_velocity
+            for src, rec, dist in zip(
+                source_node_id,
+                receiver_node_id,
+                distance_m,
+                strict=True,
+            )
+        ],
+        dtype=np.float64,
+    )
+    pick_time[2] += 1.0
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(3, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=1,
+        n_traces=3,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(
+            min_picks_per_node=1,
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=1.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            ),
+        ),
+    )
+
     assert result.robust_stop_reason == 'safe_rejection'
     assert result.n_rejected_observations == 0
-    np.testing.assert_array_equal(result.used_observation_mask_sorted, valid_mask)
-    assert result.robust_iteration_summaries[0].n_rejected_this_iteration == 0
+    np.testing.assert_array_equal(result.used_observation_mask_sorted, [True] * 3)
+    np.testing.assert_array_equal(result.node_observation_count, [2, 1, 3])
+    assert result.system.n_node_components == 1
 
 
 def test_refraction_solver_rejects_mismatched_design_model_modes() -> None:
