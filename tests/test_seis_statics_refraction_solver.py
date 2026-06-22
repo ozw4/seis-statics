@@ -326,22 +326,10 @@ def test_refraction_solver_large_sparse_skinny_rank_uses_sparse_path(
 def test_refraction_solver_sparse_rank_one_uses_largest_singular_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, int]] = []
+    def fail_svds(*args: object, **kwargs: object) -> object:
+        raise AssertionError('rank-one sparse certification should not request SM svds')
 
-    def fake_svds(
-        scaled_matrix: sparse.csr_matrix,
-        *,
-        k: int,
-        which: str,
-        return_singular_vectors: bool,
-    ) -> np.ndarray:
-        assert return_singular_vectors is False
-        calls.append((which, int(k)))
-        if which == 'LM':
-            return np.asarray([1.0], dtype=np.float64)
-        raise AssertionError(f'unexpected svds request for shape {scaled_matrix.shape}')
-
-    monkeypatch.setattr(solver_module.sparse_linalg, 'svds', fake_svds)
+    monkeypatch.setattr(solver_module.sparse_linalg, 'svds', fail_svds)
 
     diagnostic = solver_module._sparse_column_scaled_numerical_rank(
         sparse.csr_matrix(([1.0], ([0], [0])), shape=(3, 3), dtype=np.float64),
@@ -351,44 +339,212 @@ def test_refraction_solver_sparse_rank_one_uses_largest_singular_value(
     )
 
     assert diagnostic.estimated_rank == 1
-    assert diagnostic.critical_singular_value == 1.0
-    assert calls == [('LM', 1)]
+    assert diagnostic.critical_singular_value == pytest.approx(1.0)
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.requested_smallest_count == 0
 
 
-def test_refraction_solver_sparse_rank_failure_reports_diagnostic_rank(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, int]] = []
-
-    def fake_svds(
-        scaled_matrix: sparse.csr_matrix,
-        *,
-        k: int,
-        which: str,
-        return_singular_vectors: bool,
-    ) -> np.ndarray:
-        assert return_singular_vectors is False
-        calls.append((which, int(k)))
-        if which == 'LM':
-            return np.asarray([1.0], dtype=np.float64)
-        if int(k) == 1:
-            return np.asarray([0.0], dtype=np.float64)
-        if int(k) == 5:
-            return np.asarray([0.0, 0.0, 1.0, 1.0, 1.0], dtype=np.float64)
-        raise AssertionError(f'unexpected svds request for shape {scaled_matrix.shape}')
-
-    monkeypatch.setattr(solver_module.sparse_linalg, 'svds', fake_svds)
-
+def test_refraction_solver_large_sparse_exact_zero_is_not_full_rank() -> None:
+    n = 1100
     diagnostic = solver_module._sparse_column_scaled_numerical_rank(
-        sparse.eye(6, format='csr', dtype=np.float64),
-        expected_rank=6,
+        sparse.diags(np.r_[np.ones(n - 1), 0.0], format='csr'),
+        expected_rank=n,
         expected_nullity=0,
         rtol=1.0e-10,
     )
 
-    assert diagnostic.estimated_rank == 4
-    assert diagnostic.critical_singular_value == 0.0
-    assert calls == [('LM', 1), ('SM', 1), ('SM', 5)]
+    assert diagnostic.method == 'sparse_normal_eigsh'
+    assert diagnostic.sparse_solver_name == 'propack_svds+eigsh_normal'
+    assert diagnostic.estimated_rank == n - 1
+    assert diagnostic.certification_status == 'rank_deficient'
+    assert diagnostic.requested_smallest_count == 1
+    assert diagnostic.returned_smallest_count == 1
+    assert diagnostic.critical_singular_value <= diagnostic.threshold
+
+
+def test_refraction_solver_large_sparse_full_rank_control_is_certified() -> None:
+    n = 1100
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        sparse.eye(n, format='csr', dtype=np.float64),
+        expected_rank=n,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.estimated_rank == n
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.critical_singular_value > diagnostic.threshold
+    assert diagnostic.max_singular_triplet_residual < 1.0e-8
+
+
+def test_refraction_solver_large_sparse_allowed_nullity_boundary() -> None:
+    n = 1100
+    one_null = solver_module._sparse_column_scaled_numerical_rank(
+        sparse.diags(np.r_[np.ones(n - 1), 0.0], format='csr'),
+        expected_rank=n - 1,
+        expected_nullity=1,
+        rtol=1.0e-10,
+    )
+    two_null = solver_module._sparse_column_scaled_numerical_rank(
+        sparse.diags(np.r_[np.ones(n - 2), 0.0, 0.0], format='csr'),
+        expected_rank=n - 1,
+        expected_nullity=1,
+        rtol=1.0e-10,
+    )
+
+    assert one_null.estimated_rank == n - 1
+    assert one_null.certification_status == 'certified'
+    assert one_null.requested_smallest_count == 2
+    assert two_null.estimated_rank == n - 2
+    assert two_null.certification_status == 'rank_deficient'
+    assert two_null.critical_singular_value <= two_null.threshold
+
+
+def test_refraction_solver_sparse_near_threshold_policy() -> None:
+    n = 1100
+    above = solver_module._sparse_column_scaled_numerical_rank(
+        sparse.diags(np.r_[np.ones(n - 1), 1.0e-8], format='csr'),
+        expected_rank=n,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+    below = solver_module._sparse_column_scaled_numerical_rank(
+        sparse.diags(np.r_[np.ones(n - 1), 1.0e-12], format='csr'),
+        expected_rank=n,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert above.certification_status == 'certified'
+    assert above.estimated_rank == n
+    assert below.certification_status == 'rank_deficient'
+    assert below.estimated_rank == n - 1
+    with pytest.raises(RefractionStaticSolverError, match='too close'):
+        solver_module._sparse_column_scaled_numerical_rank(
+            sparse.diags(np.r_[np.ones(n - 1), 1.0e-10], format='csr'),
+            expected_rank=n,
+            expected_nullity=0,
+            rtol=1.0e-10,
+        )
+
+
+def test_refraction_solver_sparse_nonconvergence_does_not_certify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_svds(*args: object, **kwargs: object) -> object:
+        raise RuntimeError('no convergence')
+
+    monkeypatch.setattr(solver_module.sparse_linalg, 'svds', fail_svds)
+
+    with pytest.raises(RefractionStaticSolverError, match='did not converge'):
+        solver_module._sparse_column_scaled_numerical_rank(
+            sparse.eye(1100, format='csr', dtype=np.float64),
+            expected_rank=1100,
+            expected_nullity=0,
+            rtol=1.0e-10,
+        )
+
+
+def test_refraction_solver_sparse_bad_triplet_residual_does_not_certify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def bad_triplets(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        return solver_module._SparseSingularTripletDiagnostic(
+            singular_values=np.ones(int(k), dtype=np.float64),
+            max_residual=1.0,
+        )
+
+    monkeypatch.setattr(solver_module, '_sparse_svds_singular_triplets', bad_triplets)
+
+    with pytest.raises(RefractionStaticSolverError, match='residual is too large'):
+        solver_module._sparse_column_scaled_numerical_rank(
+            sparse.eye(1100, format='csr', dtype=np.float64),
+            expected_rank=1100,
+            expected_nullity=0,
+            rtol=1.0e-10,
+        )
+
+
+def test_refraction_solver_large_sparse_global_slowness_duplicate_path_regression() -> None:
+    n_nodes = 1100
+    source_node_id = np.r_[np.arange(n_nodes - 1), 0].astype(np.int64)
+    receiver_node_id = np.r_[np.arange(1, n_nodes), 1].astype(np.int64)
+    distance_m = np.full(n_nodes, 500.0, dtype=np.float64)
+    pick_time = np.full(n_nodes, 0.25, dtype=np.float64)
+
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(n_nodes, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.arange(n_nodes, dtype=np.int64),
+        bedrock_velocity_mode='solve_global',
+        n_traces=n_nodes,
+    )
+
+    with pytest.raises(
+        RefractionStaticSolverError,
+        match='physical system is not identifiable',
+    ):
+        solve_refraction_static_design_least_squares(
+            design,
+            model=_model(mode='solve_global'),
+            solver_options=_solver_options(),
+        )
+
+
+def test_refraction_solver_large_sparse_global_slowness_distance_variation_is_certified_without_densifying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_nodes = 1100
+    source_node_id = np.r_[np.zeros(n_nodes - 1, dtype=np.int64), 0]
+    receiver_node_id = np.r_[np.arange(1, n_nodes), 1].astype(np.int64)
+    distance_m = np.full(n_nodes, 500.0, dtype=np.float64)
+    distance_m[-1] = 700.0
+    true_node_half_intercept_s = np.full(n_nodes, 0.02, dtype=np.float64)
+    true_velocity = 2500.0
+    pick_time = (
+        true_node_half_intercept_s[source_node_id]
+        + true_node_half_intercept_s[receiver_node_id]
+        + distance_m / true_velocity
+    )
+
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(n_nodes, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.arange(n_nodes, dtype=np.int64),
+        bedrock_velocity_mode='solve_global',
+        n_traces=n_nodes,
+    )
+
+    def fail_toarray(self: sparse.csr_matrix, *args: object, **kwargs: object) -> object:
+        raise AssertionError('large sparse solve_global system was densified')
+
+    monkeypatch.setattr(sparse.csr_matrix, 'toarray', fail_toarray)
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(),
+    )
+
+    assert result.bedrock_velocity_m_s == pytest.approx(true_velocity, abs=1.0e-5)
+    assert result.system.identifiability.method == 'sparse_normal_eigsh'
+    assert result.system.identifiability.expected_rank == n_nodes
+    assert result.system.identifiability.estimated_rank == n_nodes
+    assert result.system.identifiability.certification_status == 'certified'
+    assert result.system.identifiability.critical_singular_value > (
+        result.system.identifiability.threshold
+    )
 
 
 def test_refraction_solver_system_gauge_rows_are_conceptual_not_matrix_rows() -> None:
