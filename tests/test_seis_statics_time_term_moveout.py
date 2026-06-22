@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -18,7 +17,6 @@ from seis_statics.time_term.moveout import (
 )
 
 N_TRACES = 5
-N_SAMPLES = 64
 DT = 0.004
 GEOMETRY_DISTANCE = np.asarray([5.0, 5.0, 10.0, 10.0, 10.0], dtype=np.float64)
 OFFSET = np.asarray([-5.0, 5.0, -10.0, 9.0, -12.0], dtype=np.float64)
@@ -30,33 +28,17 @@ def _inputs(**overrides: Any) -> TimeTermInversionInputs:
     residual = np.asarray([-0.0005, 0.0, 0.0005, 0.001, -0.001], dtype=np.float64)
     payload: dict[str, Any] = {
         'n_traces': N_TRACES,
-        'n_samples': N_SAMPLES,
         'dt': DT,
-        'key1_byte': 189,
-        'key2_byte': 193,
-        'pick_time_raw_s_sorted': pick_raw,
         'valid_pick_mask_sorted': np.ones(N_TRACES, dtype=bool),
-        'datum_trace_shift_s_sorted': datum,
-        'residual_applied_shift_s_sorted': residual,
         'pick_time_after_static_s_sorted': pick_raw + datum + residual,
         'source_node_id_sorted': np.asarray([0, 1, 0, 2, 1], dtype=np.int64),
         'receiver_node_id_sorted': np.asarray([1, 0, 2, 0, 0], dtype=np.int64),
         'n_nodes': 3,
-        'source_id_sorted': np.asarray([10, 20, 10, 30, 20], dtype=np.int64),
-        'receiver_id_sorted': np.asarray([20, 10, 30, 10, 10], dtype=np.int64),
         'offset_sorted': OFFSET.copy(),
         'source_x_m_sorted': np.asarray([0.0, 3.0, 0.0, 6.0, 8.0]),
         'source_y_m_sorted': np.asarray([0.0, 4.0, 0.0, 8.0, 6.0]),
         'receiver_x_m_sorted': np.asarray([3.0, 0.0, 6.0, 0.0, 0.0]),
         'receiver_y_m_sorted': np.asarray([4.0, 0.0, 8.0, 0.0, 0.0]),
-        'source_elevation_m_sorted': np.zeros(N_TRACES, dtype=np.float64),
-        'receiver_elevation_m_sorted': np.zeros(N_TRACES, dtype=np.float64),
-        'source_depth_m_sorted': np.zeros(N_TRACES, dtype=np.float64),
-        'input_file_id': 'file-id',
-        'pick_source_description': 'test-picks',
-        'datum_solution_path': Path('datum.npz'),
-        'residual_solution_path': Path('residual.npz'),
-        'linkage_artifact_path': Path('geometry_linkage.npz'),
     }
     payload.update(overrides)
     return TimeTermInversionInputs(**payload)
@@ -268,19 +250,11 @@ def test_head_wave_moveout_preserves_sorted_trace_order() -> None:
             receiver_y_m_sorted=np.asarray([0.0, 0.0, 0.0]),
             source_node_id_sorted=np.asarray([0, 1, 2]),
             receiver_node_id_sorted=np.asarray([1, 2, 0]),
-            source_id_sorted=np.asarray([10, 20, 30]),
-            receiver_id_sorted=np.asarray([20, 30, 10]),
             offset_sorted=np.asarray([1.0, 3.0, 2.0]),
             n_traces=3,
             n_nodes=3,
-            pick_time_raw_s_sorted=np.asarray([0.01, 0.02, 0.03]),
             valid_pick_mask_sorted=np.ones(3, dtype=bool),
-            datum_trace_shift_s_sorted=np.zeros(3),
-            residual_applied_shift_s_sorted=np.zeros(3),
             pick_time_after_static_s_sorted=np.asarray([0.01, 0.02, 0.03]),
-            source_elevation_m_sorted=np.zeros(3),
-            receiver_elevation_m_sorted=np.zeros(3),
-            source_depth_m_sorted=np.zeros(3),
         )
     )
 
@@ -378,8 +352,6 @@ def test_moveout_time_is_not_applied_static_shift() -> None:
     base = _inputs()
     shifted = replace(
         base,
-        datum_trace_shift_s_sorted=np.full(N_TRACES, 10.0),
-        residual_applied_shift_s_sorted=np.full(N_TRACES, -5.0),
         pick_time_after_static_s_sorted=np.full(N_TRACES, 99.0),
     )
 

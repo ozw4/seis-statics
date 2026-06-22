@@ -89,6 +89,14 @@ def test_refraction_options_validate_cell_layer_model_and_datum_constraints() ->
     with pytest.raises(ValueError, match='floating_datum_elevation_m'):
         RefractionStaticDatumOptions(floating_datum_mode='constant')
 
+    assert RefractionStaticDatumOptions(floating_datum_mode='provided').floating_datum_mode == 'provided'
+
+    with pytest.raises(ValueError, match='floating_datum_mode'):
+        RefractionStaticDatumOptions(floating_datum_mode='from_artifact')
+
+    with pytest.raises(TypeError, match='floating_datum_job_id'):
+        RefractionStaticDatumOptions(floating_datum_job_id='job-1')  # type: ignore[call-arg]
+
 
 def test_refraction_moveout_robust_solver_and_conversion_options_validate() -> None:
     assert RefractionStaticMoveoutOptions(distance_source='offset_header').offset_byte == 37

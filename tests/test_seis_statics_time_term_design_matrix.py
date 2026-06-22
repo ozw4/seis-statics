@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -17,7 +16,6 @@ from seis_statics.time_term import (
 )
 
 N_TRACES = 4
-N_SAMPLES = 64
 DT = 0.004
 N_NODES = 3
 
@@ -32,33 +30,17 @@ VALID_MOVEOUT_MASK = np.asarray([True, True, True, True])
 def _inputs(**overrides: Any) -> TimeTermInversionInputs:
     payload: dict[str, Any] = {
         'n_traces': N_TRACES,
-        'n_samples': N_SAMPLES,
         'dt': DT,
-        'key1_byte': 189,
-        'key2_byte': 193,
-        'pick_time_raw_s_sorted': PICK_TIME_AFTER_STATIC.copy(),
         'valid_pick_mask_sorted': VALID_PICK_MASK.copy(),
-        'datum_trace_shift_s_sorted': np.zeros(N_TRACES, dtype=np.float64),
-        'residual_applied_shift_s_sorted': np.zeros(N_TRACES, dtype=np.float64),
         'pick_time_after_static_s_sorted': PICK_TIME_AFTER_STATIC.copy(),
         'source_node_id_sorted': SOURCE_NODE_ID.copy(),
         'receiver_node_id_sorted': RECEIVER_NODE_ID.copy(),
         'n_nodes': N_NODES,
-        'source_id_sorted': np.asarray([10, 10, 20, 30], dtype=np.int64),
-        'receiver_id_sorted': np.asarray([20, 30, 30, 30], dtype=np.int64),
         'offset_sorted': np.asarray([100.0, 200.0, 300.0, 0.0]),
         'source_x_m_sorted': np.zeros(N_TRACES, dtype=np.float64),
         'source_y_m_sorted': np.zeros(N_TRACES, dtype=np.float64),
         'receiver_x_m_sorted': np.ones(N_TRACES, dtype=np.float64),
         'receiver_y_m_sorted': np.zeros(N_TRACES, dtype=np.float64),
-        'source_elevation_m_sorted': np.zeros(N_TRACES, dtype=np.float64),
-        'receiver_elevation_m_sorted': np.zeros(N_TRACES, dtype=np.float64),
-        'source_depth_m_sorted': np.zeros(N_TRACES, dtype=np.float64),
-        'input_file_id': 'file-id',
-        'pick_source_description': 'test-picks',
-        'datum_solution_path': Path('datum.npz'),
-        'residual_solution_path': Path('residual.npz'),
-        'linkage_artifact_path': Path('geometry_linkage.npz'),
     }
     payload.update(overrides)
     return TimeTermInversionInputs(**payload)
