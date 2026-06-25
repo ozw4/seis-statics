@@ -2141,19 +2141,318 @@ def test_refraction_solver_robust_fixed_global_recovers_solution() -> None:
         ),
     )
 
-    assert result.robust_stop_reason == 'converged'
+    assert result.robust_stop_reason in {'converged', 'zero_scale'}
+    assert result.qc['robust_successful'] is True
     assert result.n_rejected_observations >= 1
+    assert result.n_final_used_observations >= 1
     assert result.rejected_observation_mask_sorted[5]
     np.testing.assert_allclose(
         result.node_half_intercept_time_s,
         [0.03, 0.05, 0.035, 0.045],
         atol=1.0e-10,
     )
+    used_row_mask = result.used_observation_mask_sorted[
+        result.design.row_trace_index_sorted
+    ]
     np.testing.assert_allclose(
-        result.row_residual_s[result.used_observation_mask_sorted],
+        result.row_residual_s[used_row_mask],
         0.0,
         atol=1.0e-10,
     )
+
+
+def test_refraction_solver_robust_fixed_global_repeat_keeps_success_contract() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    valid_mask = np.ones(valid_mask.shape, dtype=bool)
+    pick_time = pick_time.copy()
+    pick_time[5] += 0.12
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+    solver_options = _solver_options(
+        robust=RefractionStaticRobustOptions(
+            enabled=True,
+            method='mad',
+            threshold=2.0,
+            scale_floor_ms=0.0,
+            max_iterations=5,
+            min_used_fraction=0.5,
+            min_used_observations=1,
+        )
+    )
+
+    results = [
+        solve_refraction_static_design_least_squares(
+            design,
+            model=_model(mode='fixed_global', fixed_velocity=2500.0),
+            solver_options=solver_options,
+        )
+        for _ in range(5)
+    ]
+    baseline = results[0]
+    baseline_used_row_mask = baseline.used_observation_mask_sorted[
+        baseline.design.row_trace_index_sorted
+    ]
+    baseline_used_residual = baseline.row_residual_s[baseline_used_row_mask]
+
+    for result in results:
+        assert result.robust_stop_reason in {'converged', 'zero_scale'}
+        assert result.qc['robust_successful'] is True
+        assert result.n_final_used_observations == baseline.n_final_used_observations
+        assert result.n_final_used_observations >= 1
+        assert result.n_rejected_observations == baseline.n_rejected_observations
+        assert result.rejected_observation_mask_sorted[5]
+        np.testing.assert_array_equal(
+            result.rejected_observation_mask_sorted,
+            baseline.rejected_observation_mask_sorted,
+        )
+        np.testing.assert_array_equal(
+            result.used_observation_mask_sorted,
+            baseline.used_observation_mask_sorted,
+        )
+        used_row_mask = result.used_observation_mask_sorted[
+            result.design.row_trace_index_sorted
+        ]
+        used_residual = result.row_residual_s[used_row_mask]
+        assert np.all(np.isfinite(used_residual))
+        np.testing.assert_allclose(
+            used_residual,
+            baseline_used_residual,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(used_residual, 0.0, atol=1.0e-10)
+
+
+def test_refraction_solver_robust_fixed_global_zero_scale_is_successful() -> None:
+    fixed_velocity = 2500.0
+    source_node_id = np.asarray([10, 10, 20, 20, 20], dtype=np.int64)
+    receiver_node_id = np.asarray([30, 30, 40, 40, 30], dtype=np.int64)
+    distance_m = np.asarray([500.0, 600.0, 500.0, 600.0, 700.0])
+    true_t1_by_node = {
+        10: 0.02,
+        20: 0.04,
+        30: 0.03,
+        40: 0.05,
+    }
+    pick_time = np.asarray(
+        [
+            true_t1_by_node[int(src)]
+            + true_t1_by_node[int(rec)]
+            + dist / fixed_velocity
+            for src, rec, dist in zip(
+                source_node_id,
+                receiver_node_id,
+                distance_m,
+                strict=True,
+            )
+        ],
+        dtype=np.float64,
+    )
+    pick_time[4] += 0.12
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(5, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=1,
+        n_traces=5,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(
+            min_picks_per_node=1,
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=1.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            ),
+        ),
+    )
+
+    assert result.robust_stop_reason == 'zero_scale'
+    assert result.qc['robust_successful'] is True
+    assert result.n_rejected_observations >= 1
+    assert np.any(result.rejected_observation_mask_sorted)
+    assert np.all(np.isfinite(result.row_residual_s))
+    assert result.robust_iteration_summaries[-1].converged is True
+    assert result.qc['robust_iterations'][-1]['converged'] is True
+
+
+def test_refraction_solver_robust_fixed_global_nonzero_scale_converges() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    valid_mask = np.ones(valid_mask.shape, dtype=bool)
+    pick_time = pick_time.copy()
+    pick_time[:5] += np.asarray([0.00010, -0.00008, 0.00004, -0.00003, 0.00007])
+    pick_time[5] += 0.12
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=2.5,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            )
+        ),
+    )
+
+    assert result.robust_stop_reason == 'converged'
+    assert result.qc['robust_successful'] is True
+    assert result.n_rejected_observations == 1
+    assert result.robust_iteration_summaries[-1].residual_scale_s > 0.0
+    assert result.robust_iteration_summaries[-1].converged is True
+    used_row_mask = result.used_observation_mask_sorted[
+        result.design.row_trace_index_sorted
+    ]
+    used_residual = result.row_residual_s[used_row_mask]
+    assert np.all(np.isfinite(used_residual))
+    assert not np.allclose(used_residual, 0.0, atol=1.0e-10)
+
+
+def test_refraction_solver_robust_invalid_residual_does_not_hide_as_zero_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+
+    def invalid_modeled_pick_time(
+        design: solver_module.RefractionStaticDesignMatrix,
+        *,
+        parameter_vector: np.ndarray,
+    ) -> np.ndarray:
+        _ = parameter_vector
+        return np.full(design.n_observations, np.nan)
+
+    monkeypatch.setattr(
+        solver_module,
+        '_row_modeled_pick_time',
+        invalid_modeled_pick_time,
+    )
+
+    with pytest.raises(RefractionStaticSolverError, match='row_residual_s'):
+        solve_refraction_static_design_least_squares(
+            design,
+            model=_model(mode='fixed_global', fixed_velocity=2500.0),
+            solver_options=_solver_options(
+                robust=RefractionStaticRobustOptions(
+                    enabled=True,
+                    method='mad',
+                    threshold=2.0,
+                    scale_floor_ms=0.0,
+                    max_iterations=5,
+                    min_used_fraction=0.5,
+                    min_used_observations=1,
+                )
+            ),
+        )
+
+
+def test_refraction_solver_robust_zero_scale_requires_safe_used_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+
+    def zero_center_scale(residual_s: np.ndarray, *, method: str) -> tuple[float, float]:
+        _ = method
+        return float(np.median(residual_s)), 0.0
+
+    monkeypatch.setattr(
+        solver_module,
+        '_robust_center_scale',
+        zero_center_scale,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=2.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=1.0,
+                min_used_observations=7,
+            )
+        ),
+    )
+
+    assert result.robust_stop_reason == 'zero_scale'
+    assert result.qc['robust_successful'] is False
+    assert result.robust_iteration_summaries[-1].converged is False
+    assert result.n_final_used_observations == 5
+
+
+def test_refraction_solver_robust_successful_stop_reason_classification() -> None:
+    assert solver_module._robust_stop_is_successful('converged') is True
+    assert solver_module._robust_stop_is_successful('zero_scale') is True
+    assert solver_module._robust_stop_is_successful('no_outliers') is True
+    assert solver_module._robust_stop_is_successful('safe_rejection') is False
+    assert solver_module._robust_stop_is_successful('max_iterations') is False
 
 
 def test_refraction_solver_robust_safe_rejection_preserves_used_floor() -> None:

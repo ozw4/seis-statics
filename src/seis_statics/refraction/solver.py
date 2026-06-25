@@ -144,6 +144,18 @@ RefractionStaticRobustStopReason = Literal[
     'safe_rejection',
 ]
 
+_ROBUST_SUCCESS_STOP_REASONS = frozenset(
+    {
+        'converged',
+        'zero_scale',
+        'no_outliers',
+    }
+)
+
+
+def _robust_stop_is_successful(reason: str) -> bool:
+    return reason in _ROBUST_SUCCESS_STOP_REASONS
+
 
 @dataclass(frozen=True)
 class RefractionStaticRobustIterationSummary:
@@ -234,6 +246,7 @@ class _RefractionStaticRobustRunResult:
     rejected_iteration_sorted: np.ndarray
     iteration_summaries: tuple[RefractionStaticRobustIterationSummary, ...]
     stop_reason: RefractionStaticRobustStopReason
+    robust_successful: bool
 
 
 @dataclass(frozen=True)
@@ -1967,12 +1980,14 @@ def _run_refraction_static_solver(
             rejected_iteration_sorted=rejected_iteration_sorted,
             iteration_summaries=(),
             stop_reason='disabled',
+            robust_successful=False,
         )
 
     current_row_mask = initial_row_mask.copy()
     final_raw: optimize.OptimizeResult | None = None
     final_system: RefractionStaticSolveSystem | None = None
     stop_reason: RefractionStaticRobustStopReason | None = None
+    robust_successful = False
     summaries: list[RefractionStaticRobustIterationSummary] = []
 
     for iteration_index in range(robust.max_iterations):
@@ -2005,6 +2020,19 @@ def _run_refraction_static_solver(
 
         if scale_s <= 0.0:
             stop_reason = 'zero_scale'
+            robust_successful = _zero_scale_stop_is_successful(
+                design=design,
+                system=system,
+                initial_row_mask=initial_row_mask,
+                current_row_mask=current_row_mask,
+                current_residual_s=current_residual,
+                center_s=center_s,
+                raw_scale_s=raw_scale_s,
+                scale_floor_s=scale_floor_s,
+                raw_result=raw,
+                min_used_fraction=robust.min_used_fraction,
+                min_used_observations=robust.min_used_observations,
+            )
             final_raw = raw
             final_system = current_system
             summaries.append(
@@ -2019,7 +2047,7 @@ def _run_refraction_static_solver(
                     residual_scale_floor_s=scale_floor_s,
                     residual_cutoff_s=cutoff_s,
                     max_abs_centered_residual_s=max_abs_centered_residual_s,
-                    converged=False,
+                    converged=robust_successful,
                     stop_reason=stop_reason,
                 )
             )
@@ -2030,6 +2058,7 @@ def _run_refraction_static_solver(
         outlier_local = centered_abs > cutoff_s
         if not np.any(outlier_local):
             stop_reason = 'converged'
+            robust_successful = True
             final_raw = raw
             final_system = current_system
             summaries.append(
@@ -2064,6 +2093,7 @@ def _run_refraction_static_solver(
         )
         if rejected_rows.size == 0:
             stop_reason = 'safe_rejection'
+            robust_successful = False
             final_raw = raw
             final_system = current_system
             summaries.append(
@@ -2110,6 +2140,7 @@ def _run_refraction_static_solver(
         current_row_mask = proposed_row_mask
     else:
         stop_reason = 'max_iterations'
+        robust_successful = False
         final_system = _rebuild_refraction_static_solver_system_for_row_mask(
             design=design,
             system=system,
@@ -2138,7 +2169,44 @@ def _run_refraction_static_solver(
         ),
         iteration_summaries=tuple(summaries),
         stop_reason=stop_reason,
+        robust_successful=robust_successful,
     )
+
+
+def _zero_scale_stop_is_successful(
+    *,
+    design: RefractionStaticDesignMatrix,
+    system: RefractionStaticSolveSystem,
+    initial_row_mask: np.ndarray,
+    current_row_mask: np.ndarray,
+    current_residual_s: np.ndarray,
+    center_s: float,
+    raw_scale_s: float,
+    scale_floor_s: float,
+    raw_result: optimize.OptimizeResult,
+    min_used_fraction: float,
+    min_used_observations: int,
+) -> bool:
+    scale_s = max(float(raw_scale_s), float(scale_floor_s))
+    if not bool(getattr(raw_result, 'success', False)):
+        return False
+    if not np.all(np.isfinite(current_residual_s)):
+        return False
+    if not np.all(np.isfinite([center_s, raw_scale_s, scale_floor_s, scale_s])):
+        return False
+    if raw_scale_s < 0.0 or scale_floor_s < 0.0:
+        return False
+    if scale_s > 0.0:
+        return False
+    return _robust_row_mask_is_safe(
+        design=design,
+        system=system,
+        initial_row_mask=initial_row_mask,
+        row_used_mask=current_row_mask,
+        min_used_fraction=min_used_fraction,
+        min_used_observations=min_used_observations,
+    )
+
 
 def _safe_rejection_rows(
     *,
@@ -3598,6 +3666,7 @@ def _build_solver_qc(
             or len(robust_result.iteration_summaries) > 0
         ),
         'robust_stop_reason': robust_result.stop_reason,
+        'robust_successful': bool(robust_result.robust_successful),
         'robust_iteration_count': len(robust_result.iteration_summaries),
         'robust_iterations': [
             _robust_iteration_summary_json(summary)
