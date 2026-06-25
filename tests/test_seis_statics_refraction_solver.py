@@ -5,6 +5,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from scipy import optimize, sparse
+from scipy.sparse import linalg as sparse_linalg
 
 from seis_statics.refraction import (
     RefractionStaticModelOptions,
@@ -1155,7 +1156,49 @@ def test_refraction_solver_sparse_rank_zero_reports_largest_solver_only() -> Non
     assert diagnostic.requested_smallest_count == 0
 
 
-def test_refraction_solver_large_sparse_exact_zero_is_not_full_rank() -> None:
+def _sparse_banded_rank_control_matrix(n: int) -> sparse.csr_matrix:
+    diagonal = np.ones(int(n), dtype=np.float64)
+    subdiagonal = np.linspace(0.05, 0.15, int(n) - 1, dtype=np.float64)
+    return sparse.diags(
+        diagonals=(diagonal, subdiagonal),
+        offsets=(0, -1),
+        format='csr',
+    )
+
+
+def _sparse_banded_rank_deficient_matrix(
+    n: int,
+    *,
+    nullity: int,
+) -> sparse.csr_matrix:
+    diagonal = np.ones(int(n), dtype=np.float64)
+    diagonal[-int(nullity) :] = 0.0
+    subdiagonal = np.linspace(0.05, 0.15, int(n) - 1, dtype=np.float64)
+    if nullity > 1:
+        subdiagonal[-(int(nullity) - 1) :] = 0.0
+    return sparse.diags(
+        diagonals=(diagonal, subdiagonal),
+        offsets=(0, -1),
+        format='csr',
+    )
+
+
+def test_refraction_solver_large_sparse_exact_zero_is_not_full_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_svds(*args: object, **kwargs: object) -> object:
+        raise AssertionError('structural-rank deficiency should not call svds')
+
+    def fail_normal(*args: object, **kwargs: object) -> object:
+        raise AssertionError('structural-rank deficiency should not call eigsh')
+
+    monkeypatch.setattr(solver_module, '_sparse_svds_singular_triplets', fail_svds)
+    monkeypatch.setattr(
+        solver_module,
+        '_sparse_normal_singular_triplets',
+        fail_normal,
+    )
+
     n = 1100
     diagnostic = solver_module._sparse_column_scaled_numerical_rank(
         sparse.diags(np.r_[np.ones(n - 1), 0.0], format='csr'),
@@ -1164,19 +1207,27 @@ def test_refraction_solver_large_sparse_exact_zero_is_not_full_rank() -> None:
         rtol=1.0e-10,
     )
 
-    assert diagnostic.method == 'sparse_normal_eigsh'
-    assert diagnostic.sparse_solver_name == 'propack_svds+eigsh_normal'
+    assert diagnostic.method == 'sparse_structural_rank'
+    assert diagnostic.structural_rank == n - 1
     assert diagnostic.estimated_rank == n - 1
     assert diagnostic.certification_status == 'rank_deficient'
-    assert diagnostic.requested_smallest_count == 1
-    assert diagnostic.returned_smallest_count == 1
-    assert diagnostic.critical_singular_value <= diagnostic.threshold
+    assert diagnostic.failure_reason == 'structural rank is below expected rank'
+    assert diagnostic.requested_smallest_count == 0
 
 
 def test_refraction_solver_large_sparse_full_rank_control_is_certified() -> None:
     n = 1100
+    small_control = _sparse_banded_rank_control_matrix(32)
+    assert np.linalg.matrix_rank(small_control.toarray()) == 32
+    scaled_small_control = solver_module._column_l2_scaled_matrix(small_control)
+    scaled_singular_values = np.linalg.svd(
+        scaled_small_control.toarray(),
+        compute_uv=False,
+    )
+    assert np.min(np.diff(np.sort(scaled_singular_values))) > 1.0e-12
+
     diagnostic = solver_module._sparse_column_scaled_numerical_rank(
-        sparse.eye(n, format='csr', dtype=np.float64),
+        _sparse_banded_rank_control_matrix(n),
         expected_rank=n,
         expected_nullity=0,
         rtol=1.0e-10,
@@ -1184,20 +1235,31 @@ def test_refraction_solver_large_sparse_full_rank_control_is_certified() -> None
 
     assert diagnostic.estimated_rank == n
     assert diagnostic.certification_status == 'certified'
+    assert diagnostic.structural_rank == n
     assert diagnostic.critical_singular_value > diagnostic.threshold
     assert diagnostic.max_singular_triplet_residual < 1.0e-8
+    assert diagnostic.selected_candidate in {'propack_svds', 'eigsh_normal'}
 
 
 def test_refraction_solver_large_sparse_allowed_nullity_boundary() -> None:
     n = 1100
+    one_null_fixture = _sparse_banded_rank_deficient_matrix(n, nullity=1)
+    two_null_fixture = _sparse_banded_rank_deficient_matrix(n, nullity=2)
+    assert np.linalg.matrix_rank(
+        _sparse_banded_rank_deficient_matrix(32, nullity=1).toarray()
+    ) == 31
+    assert np.linalg.matrix_rank(
+        _sparse_banded_rank_deficient_matrix(32, nullity=2).toarray()
+    ) == 30
+
     one_null = solver_module._sparse_column_scaled_numerical_rank(
-        sparse.diags(np.r_[np.ones(n - 1), 0.0], format='csr'),
+        one_null_fixture,
         expected_rank=n - 1,
         expected_nullity=1,
         rtol=1.0e-10,
     )
     two_null = solver_module._sparse_column_scaled_numerical_rank(
-        sparse.diags(np.r_[np.ones(n - 2), 0.0, 0.0], format='csr'),
+        two_null_fixture,
         expected_rank=n - 1,
         expected_nullity=1,
         rtol=1.0e-10,
@@ -1209,6 +1271,32 @@ def test_refraction_solver_large_sparse_allowed_nullity_boundary() -> None:
     assert two_null.estimated_rank == n - 2
     assert two_null.certification_status == 'rank_deficient'
     assert two_null.critical_singular_value <= two_null.threshold
+
+
+def test_refraction_solver_large_sparse_certification_is_deterministic() -> None:
+    diagnostics = tuple(
+        solver_module._sparse_column_scaled_numerical_rank(
+            _sparse_banded_rank_control_matrix(1100),
+            expected_rank=1100,
+            expected_nullity=0,
+            rtol=1.0e-10,
+        )
+        for _ in range(3)
+    )
+    fingerprints = tuple(
+        (
+            diagnostic.certification_status,
+            diagnostic.estimated_rank,
+            diagnostic.selected_candidate,
+            diagnostic.candidate_solver_names,
+            diagnostic.rejected_candidate_names,
+        )
+        for diagnostic in diagnostics
+    )
+
+    assert len(set(fingerprints)) == 1
+    assert diagnostics[0].certification_status == 'certified'
+    assert diagnostics[0].selected_candidate in {'propack_svds', 'eigsh_normal'}
 
 
 def test_refraction_solver_sparse_near_threshold_policy() -> None:
@@ -1239,7 +1327,7 @@ def test_refraction_solver_sparse_near_threshold_policy() -> None:
         )
 
 
-def test_refraction_solver_sparse_nonconvergence_does_not_certify(
+def test_refraction_solver_sparse_single_candidate_nonconvergence_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_svds(*args: object, **kwargs: object) -> object:
@@ -1247,16 +1335,63 @@ def test_refraction_solver_sparse_nonconvergence_does_not_certify(
 
     monkeypatch.setattr(solver_module.sparse_linalg, 'svds', fail_svds)
 
-    with pytest.raises(RefractionStaticSolverError, match='did not converge'):
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(1100),
+        expected_rank=1100,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.selected_candidate == 'eigsh_normal'
+    assert diagnostic.rejected_candidate_names == ('propack_svds',)
+    assert 'did not converge' in diagnostic.rejected_candidate_reasons[0]
+
+
+def test_refraction_solver_sparse_all_candidates_invalid_does_not_certify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_normal_triplets = solver_module._sparse_normal_singular_triplets
+
+    def fail_svds(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        del scaled_matrix, k, name
+        raise RefractionStaticSolverError('propack failed')
+
+    def fail_normal(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        which: object,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        if which == 'LA':
+            return original_normal_triplets(
+                scaled_matrix,
+                k=k,
+                which='LA',
+                name=name,
+            )
+        del scaled_matrix, k, name
+        raise RefractionStaticSolverError('normal failed')
+
+    monkeypatch.setattr(solver_module, '_sparse_svds_singular_triplets', fail_svds)
+    monkeypatch.setattr(solver_module, '_sparse_normal_singular_triplets', fail_normal)
+
+    with pytest.raises(RefractionStaticSolverError, match='certification unavailable'):
         solver_module._sparse_column_scaled_numerical_rank(
-            sparse.eye(1100, format='csr', dtype=np.float64),
+            _sparse_banded_rank_control_matrix(1100),
             expected_rank=1100,
             expected_nullity=0,
             rtol=1.0e-10,
         )
 
 
-def test_refraction_solver_sparse_bad_triplet_residual_does_not_certify(
+def test_refraction_solver_sparse_bad_candidate_residual_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def bad_triplets(
@@ -1272,16 +1407,22 @@ def test_refraction_solver_sparse_bad_triplet_residual_does_not_certify(
 
     monkeypatch.setattr(solver_module, '_sparse_svds_singular_triplets', bad_triplets)
 
-    with pytest.raises(RefractionStaticSolverError, match='residual is too large'):
-        solver_module._sparse_column_scaled_numerical_rank(
-            sparse.eye(1100, format='csr', dtype=np.float64),
-            expected_rank=1100,
-            expected_nullity=0,
-            rtol=1.0e-10,
-        )
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(1100),
+        expected_rank=1100,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.selected_candidate == 'eigsh_normal'
+    assert diagnostic.rejected_candidate_names == ('propack_svds',)
+    assert diagnostic.rejected_candidate_reasons == (
+        'singular triplet residual is too large',
+    )
 
 
-def test_refraction_solver_sparse_bad_allowed_null_triplet_residual_fails(
+def test_refraction_solver_sparse_bad_allowed_null_triplet_residual_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def boundary_triplets(
@@ -1324,16 +1465,19 @@ def test_refraction_solver_sparse_bad_allowed_null_triplet_residual_fails(
         normal_triplets,
     )
 
-    with pytest.raises(RefractionStaticSolverError, match='residual is too large'):
-        solver_module._sparse_column_scaled_numerical_rank(
-            sparse.eye(4, format='csr', dtype=np.float64),
-            expected_rank=3,
-            expected_nullity=1,
-            rtol=1.0e-10,
-        )
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(4),
+        expected_rank=3,
+        expected_nullity=1,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.selected_candidate == 'eigsh_normal'
+    assert diagnostic.rejected_candidate_names == ('propack_svds',)
 
 
-def test_refraction_solver_sparse_bad_corroborating_boundary_residual_fails(
+def test_refraction_solver_sparse_bad_corroborating_boundary_residual_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def good_boundary_triplets(
@@ -1374,13 +1518,103 @@ def test_refraction_solver_sparse_bad_corroborating_boundary_residual_fails(
         normal_triplets,
     )
 
-    with pytest.raises(RefractionStaticSolverError, match='residual is too large'):
-        solver_module._sparse_column_scaled_numerical_rank(
-            sparse.eye(4, format='csr', dtype=np.float64),
-            expected_rank=4,
-            expected_nullity=0,
-            rtol=1.0e-10,
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(4),
+        expected_rank=4,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.selected_candidate == 'propack_svds'
+    assert diagnostic.rejected_candidate_names == ('eigsh_normal',)
+
+
+def test_refraction_solver_sparse_valid_rank_deficient_candidate_is_not_certified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def svds_triplets(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        del scaled_matrix, name
+        return solver_module._SparseSingularTripletDiagnostic(
+            singular_values=np.zeros(int(k), dtype=np.float64),
+            max_residual=0.0,
+            residuals=np.zeros(int(k), dtype=np.float64),
         )
+
+    def normal_triplets(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        which: object,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        del scaled_matrix, name
+        singular_values = (
+            np.ones(int(k), dtype=np.float64)
+            if which == 'LA'
+            else np.zeros(int(k), dtype=np.float64)
+        )
+        return solver_module._SparseSingularTripletDiagnostic(
+            singular_values=singular_values,
+            max_residual=0.0,
+            residuals=np.zeros(int(k), dtype=np.float64),
+        )
+
+    monkeypatch.setattr(solver_module, '_sparse_svds_singular_triplets', svds_triplets)
+    monkeypatch.setattr(
+        solver_module,
+        '_sparse_normal_singular_triplets',
+        normal_triplets,
+    )
+
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(4),
+        expected_rank=4,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'rank_deficient'
+    assert diagnostic.estimated_rank == 3
+    assert diagnostic.critical_singular_value == 0.0
+    assert diagnostic.failure_reason == 'critical singular value is not above threshold'
+    assert diagnostic.selected_candidate in {'propack_svds', 'eigsh_normal'}
+
+
+def test_refraction_solver_sparse_eigsh_uses_deterministic_initial_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_v0: list[np.ndarray] = []
+
+    def fake_eigsh(
+        operator: sparse_linalg.LinearOperator,
+        **kwargs: object,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        captured_v0.append(np.asarray(kwargs['v0'], dtype=np.float64))
+        return (
+            np.ones(1, dtype=np.float64),
+            np.eye(int(operator.shape[0]), 1, dtype=np.float64),
+        )
+
+    monkeypatch.setattr(solver_module.sparse_linalg, 'eigsh', fake_eigsh)
+
+    solver_module._sparse_normal_singular_triplets(
+        sparse.eye(3, format='csr', dtype=np.float64),
+        k=1,
+        which='SA',
+        name='test singular triplet',
+    )
+
+    assert len(captured_v0) == 1
+    np.testing.assert_allclose(
+        captured_v0[0],
+        solver_module._deterministic_nonzero_vector(3),
+    )
 
 
 def test_refraction_lsq_scale_accounts_for_large_matrix_with_nonzero_rhs() -> None:
@@ -1441,7 +1675,7 @@ def test_refraction_solver_large_sparse_global_slowness_duplicate_path_regressio
 
     with pytest.raises(
         RefractionStaticSolverError,
-        match='physical system is not identifiable',
+        match='certification unavailable',
     ):
         solve_refraction_static_design_least_squares(
             design,
@@ -2042,19 +2276,318 @@ def test_refraction_solver_robust_fixed_global_recovers_solution() -> None:
         ),
     )
 
-    assert result.robust_stop_reason == 'converged'
+    assert result.robust_stop_reason in {'converged', 'zero_scale'}
+    assert result.qc['robust_successful'] is True
     assert result.n_rejected_observations >= 1
+    assert result.n_final_used_observations >= 1
     assert result.rejected_observation_mask_sorted[5]
     np.testing.assert_allclose(
         result.node_half_intercept_time_s,
         [0.03, 0.05, 0.035, 0.045],
         atol=1.0e-10,
     )
+    used_row_mask = result.used_observation_mask_sorted[
+        result.design.row_trace_index_sorted
+    ]
     np.testing.assert_allclose(
-        result.row_residual_s[result.used_observation_mask_sorted],
+        result.row_residual_s[used_row_mask],
         0.0,
         atol=1.0e-10,
     )
+
+
+def test_refraction_solver_robust_fixed_global_repeat_keeps_success_contract() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    valid_mask = np.ones(valid_mask.shape, dtype=bool)
+    pick_time = pick_time.copy()
+    pick_time[5] += 0.12
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+    solver_options = _solver_options(
+        robust=RefractionStaticRobustOptions(
+            enabled=True,
+            method='mad',
+            threshold=2.0,
+            scale_floor_ms=0.0,
+            max_iterations=5,
+            min_used_fraction=0.5,
+            min_used_observations=1,
+        )
+    )
+
+    results = [
+        solve_refraction_static_design_least_squares(
+            design,
+            model=_model(mode='fixed_global', fixed_velocity=2500.0),
+            solver_options=solver_options,
+        )
+        for _ in range(5)
+    ]
+    baseline = results[0]
+    baseline_used_row_mask = baseline.used_observation_mask_sorted[
+        baseline.design.row_trace_index_sorted
+    ]
+    baseline_used_residual = baseline.row_residual_s[baseline_used_row_mask]
+
+    for result in results:
+        assert result.robust_stop_reason in {'converged', 'zero_scale'}
+        assert result.qc['robust_successful'] is True
+        assert result.n_final_used_observations == baseline.n_final_used_observations
+        assert result.n_final_used_observations >= 1
+        assert result.n_rejected_observations == baseline.n_rejected_observations
+        assert result.rejected_observation_mask_sorted[5]
+        np.testing.assert_array_equal(
+            result.rejected_observation_mask_sorted,
+            baseline.rejected_observation_mask_sorted,
+        )
+        np.testing.assert_array_equal(
+            result.used_observation_mask_sorted,
+            baseline.used_observation_mask_sorted,
+        )
+        used_row_mask = result.used_observation_mask_sorted[
+            result.design.row_trace_index_sorted
+        ]
+        used_residual = result.row_residual_s[used_row_mask]
+        assert np.all(np.isfinite(used_residual))
+        np.testing.assert_allclose(
+            used_residual,
+            baseline_used_residual,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(used_residual, 0.0, atol=1.0e-10)
+
+
+def test_refraction_solver_robust_fixed_global_zero_scale_is_successful() -> None:
+    fixed_velocity = 2500.0
+    source_node_id = np.asarray([10, 10, 20, 20, 20], dtype=np.int64)
+    receiver_node_id = np.asarray([30, 30, 40, 40, 30], dtype=np.int64)
+    distance_m = np.asarray([500.0, 600.0, 500.0, 600.0, 700.0])
+    true_t1_by_node = {
+        10: 0.02,
+        20: 0.04,
+        30: 0.03,
+        40: 0.05,
+    }
+    pick_time = np.asarray(
+        [
+            true_t1_by_node[int(src)]
+            + true_t1_by_node[int(rec)]
+            + dist / fixed_velocity
+            for src, rec, dist in zip(
+                source_node_id,
+                receiver_node_id,
+                distance_m,
+                strict=True,
+            )
+        ],
+        dtype=np.float64,
+    )
+    pick_time[4] += 0.12
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(5, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=1,
+        n_traces=5,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(
+            min_picks_per_node=1,
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=1.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            ),
+        ),
+    )
+
+    assert result.robust_stop_reason == 'zero_scale'
+    assert result.qc['robust_successful'] is True
+    assert result.n_rejected_observations >= 1
+    assert np.any(result.rejected_observation_mask_sorted)
+    assert np.all(np.isfinite(result.row_residual_s))
+    assert result.robust_iteration_summaries[-1].converged is True
+    assert result.qc['robust_iterations'][-1]['converged'] is True
+
+
+def test_refraction_solver_robust_fixed_global_nonzero_scale_converges() -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    valid_mask = np.ones(valid_mask.shape, dtype=bool)
+    pick_time = pick_time.copy()
+    pick_time[:5] += np.asarray([0.00010, -0.00008, 0.00004, -0.00003, 0.00007])
+    pick_time[5] += 0.12
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=2.5,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=0.5,
+                min_used_observations=1,
+            )
+        ),
+    )
+
+    assert result.robust_stop_reason == 'converged'
+    assert result.qc['robust_successful'] is True
+    assert result.n_rejected_observations == 1
+    assert result.robust_iteration_summaries[-1].residual_scale_s > 0.0
+    assert result.robust_iteration_summaries[-1].converged is True
+    used_row_mask = result.used_observation_mask_sorted[
+        result.design.row_trace_index_sorted
+    ]
+    used_residual = result.row_residual_s[used_row_mask]
+    assert np.all(np.isfinite(used_residual))
+    assert not np.allclose(used_residual, 0.0, atol=1.0e-10)
+
+
+def test_refraction_solver_robust_invalid_residual_does_not_hide_as_zero_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+
+    def invalid_modeled_pick_time(
+        design: solver_module.RefractionStaticDesignMatrix,
+        *,
+        parameter_vector: np.ndarray,
+    ) -> np.ndarray:
+        _ = parameter_vector
+        return np.full(design.n_observations, np.nan)
+
+    monkeypatch.setattr(
+        solver_module,
+        '_row_modeled_pick_time',
+        invalid_modeled_pick_time,
+    )
+
+    with pytest.raises(RefractionStaticSolverError, match='row_residual_s'):
+        solve_refraction_static_design_least_squares(
+            design,
+            model=_model(mode='fixed_global', fixed_velocity=2500.0),
+            solver_options=_solver_options(
+                robust=RefractionStaticRobustOptions(
+                    enabled=True,
+                    method='mad',
+                    threshold=2.0,
+                    scale_floor_ms=0.0,
+                    max_iterations=5,
+                    min_used_fraction=0.5,
+                    min_used_observations=1,
+                )
+            ),
+        )
+
+
+def test_refraction_solver_robust_zero_scale_requires_safe_used_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_node_id, receiver_node_id, distance_m, pick_time, valid_mask = (
+        _known_global_arrays()
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=valid_mask,
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([10, 20, 30, 40]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=6,
+    )
+
+    def zero_center_scale(residual_s: np.ndarray, *, method: str) -> tuple[float, float]:
+        _ = method
+        return float(np.median(residual_s)), 0.0
+
+    monkeypatch.setattr(
+        solver_module,
+        '_robust_center_scale',
+        zero_center_scale,
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(
+            robust=RefractionStaticRobustOptions(
+                enabled=True,
+                method='mad',
+                threshold=2.0,
+                scale_floor_ms=0.0,
+                max_iterations=5,
+                min_used_fraction=1.0,
+                min_used_observations=7,
+            )
+        ),
+    )
+
+    assert result.robust_stop_reason == 'zero_scale'
+    assert result.qc['robust_successful'] is False
+    assert result.robust_iteration_summaries[-1].converged is False
+    assert result.n_final_used_observations == 5
+
+
+def test_refraction_solver_robust_successful_stop_reason_classification() -> None:
+    assert solver_module._robust_stop_is_successful('converged') is True
+    assert solver_module._robust_stop_is_successful('zero_scale') is True
+    assert solver_module._robust_stop_is_successful('no_outliers') is True
+    assert solver_module._robust_stop_is_successful('safe_rejection') is False
+    assert solver_module._robust_stop_is_successful('max_iterations') is False
 
 
 def test_refraction_solver_robust_safe_rejection_preserves_used_floor() -> None:
