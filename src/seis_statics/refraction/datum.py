@@ -248,6 +248,7 @@ def resolve_smoothed_refraction_floating_datum(
     radius = _coerce_smoothing_radius(radius_m)
 
     coordinate, coordinate_mode = _floating_datum_smoothing_coordinate(
+        node_id=nodes,
         x_m=x,
         y_m=y,
     )
@@ -902,9 +903,10 @@ def _coerce_smoothing_radius(value: float | None) -> float | None:
 
 def _floating_datum_smoothing_coordinate(
     *,
+    node_id: np.ndarray,
     x_m: np.ndarray,
     y_m: np.ndarray,
-) -> tuple[np.ndarray, Literal['line_2d_projected', 'node_order_fallback']]:
+) -> tuple[np.ndarray, Literal['line_2d_path_distance', 'node_order_fallback']]:
     coordinate = np.full(x_m.shape, np.nan, dtype=np.float64)
     finite = np.isfinite(x_m) & np.isfinite(y_m)
     if np.count_nonzero(finite) < 2:
@@ -933,15 +935,25 @@ def _floating_datum_smoothing_coordinate(
     projected = (xy[:, 0] - float(origin[0])) * axis[0] + (
         xy[:, 1] - float(origin[1])
     ) * axis[1]
-    coordinate[finite] = np.round(projected, decimals=9)
-    return np.ascontiguousarray(coordinate, dtype=np.float64), 'line_2d_projected'
+    finite_indices = np.flatnonzero(finite)
+    finite_order = finite_indices[
+        np.lexsort((node_id[finite_indices], np.round(projected, decimals=9)))
+    ]
+    step_m = np.hypot(np.diff(x_m[finite_order]), np.diff(y_m[finite_order]))
+    coordinate[finite_order] = np.concatenate(
+        (
+            np.asarray([0.0], dtype=np.float64),
+            np.cumsum(step_m, dtype=np.float64),
+        )
+    )
+    return np.ascontiguousarray(coordinate, dtype=np.float64), 'line_2d_path_distance'
 
 
 def _floating_datum_smoothing_order(
     *,
     node_id: np.ndarray,
     smoothing_coordinate_m: np.ndarray,
-    coordinate_mode: Literal['line_2d_projected', 'node_order_fallback'],
+    coordinate_mode: Literal['line_2d_path_distance', 'node_order_fallback'],
 ) -> np.ndarray:
     if coordinate_mode == 'node_order_fallback':
         return np.ascontiguousarray(np.argsort(node_id, kind='stable'), dtype=np.int64)

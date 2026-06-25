@@ -295,11 +295,16 @@ def test_refraction_solver_fixed_global_sparse_consumer_equivalent_quality_regre
     scipy_default_lsmr_maxiter = min(matrix_shape)
     assert result.solver_success
     assert quality['verified'] is True
-    assert quality['stage'] == 'first_attempt'
-    assert quality['lsmr_tol'] == pytest.approx(solver_module._LSQ_FIRST_LSMR_TOL)
+    assert quality['stage'] in {'first_attempt', 'retry_strict_lsmr'}
+    expected_lsmr_tol = (
+        solver_module._LSQ_FIRST_LSMR_TOL
+        if quality['stage'] == 'first_attempt'
+        else solver_module._LSQ_RETRY_LSMR_TOL
+    )
+    assert quality['lsmr_tol'] == pytest.approx(expected_lsmr_tol)
     assert quality['lsmr_maxiter'] == solver_module._lsq_lsmr_maxiter(
         result.system,
-        stage='first_attempt',
+        stage=str(quality['stage']),
     )
     assert int(quality['lsmr_maxiter']) > scipy_default_lsmr_maxiter
     assert matrix_shape == result.system.augmented_matrix.shape

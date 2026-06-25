@@ -332,7 +332,7 @@ def test_smoothed_refraction_floating_datum_uses_line_coordinate_and_projects_en
     np.testing.assert_allclose(result.source_elevation_m, [105.0, 115.0])
     np.testing.assert_allclose(result.receiver_elevation_m, [110.0])
     np.testing.assert_array_equal(result.smoothing_order, [1, 2, 0])
-    assert result.qc['coordinate_mode'] == 'line_2d_projected'
+    assert result.qc['coordinate_mode'] == 'line_2d_path_distance'
 
 
 def test_smoothed_refraction_floating_datum_handles_rotated_and_constant_x_lines() -> None:
@@ -414,6 +414,27 @@ def test_smoothed_refraction_floating_datum_radius_and_window_fallback() -> None
         radius_m=1.1,
     )
     assert even_summary.qc['radius_sample_count_summary']['median'] == pytest.approx(2.5)
+
+
+def test_smoothed_refraction_floating_datum_radius_uses_path_distance() -> None:
+    result = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([1, 2, 3]),
+        node_x_m=_values([1.0, np.sqrt(0.5), 0.0]),
+        node_y_m=_values([0.0, np.sqrt(0.5), 1.0]),
+        node_surface_elevation_m=_values([0.0, 100.0, 200.0]),
+        source_node_id=_ids([1, 2, 3]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+        radius_m=1.45,
+    )
+
+    np.testing.assert_array_equal(result.smoothing_order, [0, 1, 2])
+    np.testing.assert_allclose(
+        result.smoothing_coordinate_m,
+        [0.0, np.sqrt(2.0 - np.sqrt(2.0)), 2.0 * np.sqrt(2.0 - np.sqrt(2.0))],
+    )
+    np.testing.assert_allclose(result.source_elevation_m, [50.0, 100.0, 150.0])
+    assert result.qc['radius_sample_count_summary']['min'] == 2
 
 
 def test_smoothed_refraction_floating_datum_supports_median_and_nan_outputs() -> None:
