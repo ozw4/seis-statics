@@ -221,14 +221,26 @@ class _LsqLinearQualityDiagnostic:
     stage: str
     failure_reason: str
     solve_scale: float
+    matrix_shape: tuple[int, int]
+    matrix_nnz: int
     scipy_success: bool
     scipy_status: int
     scipy_optimality: float
     scipy_iterations: int
+    lsmr_tol: float | None
+    lsmr_maxiter: int | None
+    lsmr_stop_code: int | None
+    lsmr_iterations: int | None
+    lsmr_norm_r: float | None
+    lsmr_norm_ar: float | None
+    lsmr_norm_a: float | None
+    lsmr_condition_estimate: float | None
+    lsmr_norm_x: float | None
     unscaled_augmented_residual_norm: float
     unscaled_objective: float
     projected_gradient_inf_norm: float
     kkt_tolerance: float
+    projected_gradient_ratio: float
     max_bound_violation: float
     bound_tolerance: float
 
@@ -2047,6 +2059,11 @@ _LSQ_FIRST_TOL = 1.0e-12
 _LSQ_FIRST_LSMR_TOL = 1.0e-12
 _LSQ_RETRY_TOL = 1.0e-13
 _LSQ_RETRY_LSMR_TOL = 1.0e-14
+_LSQ_FIRST_LSMR_MAXITER_MIN = 1000
+_LSQ_FIRST_LSMR_MAXITER_FACTOR = 5
+_LSQ_RETRY_LSMR_MAXITER_MIN = 2000
+_LSQ_RETRY_LSMR_MAXITER_FACTOR = 20
+_LSQ_LSMR_MAXITER_CAP = 200_000
 _LSQ_DENSE_RETRY_MAX_ELEMENTS = 200_000
 _LSQ_ACTIVE_SET_MAX_ITERATIONS = 20
 
@@ -2064,6 +2081,7 @@ def _run_lsq_linear(system: RefractionStaticSolveSystem) -> optimize.OptimizeRes
         tol=_LSQ_FIRST_TOL,
         lsmr_tol=_LSQ_FIRST_LSMR_TOL,
         max_iter=max(100, 20 * int(system.n_parameters)),
+        lsmr_maxiter=_lsq_lsmr_maxiter(system, stage='first_attempt'),
         dense=False,
     )
     first_x, first_quality = _verify_lsq_linear_solution(
@@ -2105,6 +2123,7 @@ def _run_lsq_linear(system: RefractionStaticSolveSystem) -> optimize.OptimizeRes
         tol=_LSQ_RETRY_TOL,
         lsmr_tol=_LSQ_RETRY_LSMR_TOL,
         max_iter=max(1000, 100 * int(system.n_parameters)),
+        lsmr_maxiter=_lsq_lsmr_maxiter(system, stage='retry_strict_lsmr'),
         dense=False,
     )
     retry_x, retry_quality = _verify_lsq_linear_solution(
@@ -2143,6 +2162,7 @@ def _run_lsq_linear(system: RefractionStaticSolveSystem) -> optimize.OptimizeRes
             tol=_LSQ_RETRY_TOL,
             lsmr_tol=_LSQ_RETRY_LSMR_TOL,
             max_iter=max(1000, 100 * int(system.n_parameters)),
+            lsmr_maxiter=_lsq_lsmr_maxiter(system, stage='retry_strict_lsmr'),
             dense=True,
         )
         dense_x, dense_quality = _verify_lsq_linear_solution(
@@ -2171,8 +2191,40 @@ def _run_lsq_linear(system: RefractionStaticSolveSystem) -> optimize.OptimizeRes
     best_result.refraction_solver_quality = _lsq_quality_json(best_quality)
     raise RefractionStaticSolverError(
         'refraction static lsq_linear solve failed quality verification '
-        f'at {best_stage}: {best_quality.failure_reason}'
+        f'at {best_stage}: {best_quality.failure_reason}; '
+        'projected_gradient_inf_norm='
+        f'{best_quality.projected_gradient_inf_norm:.17g}; '
+        f'kkt_tolerance={best_quality.kkt_tolerance:.17g}; '
+        f'projected_gradient_ratio={best_quality.projected_gradient_ratio:.17g}; '
+        f'lsmr_tol={best_quality.lsmr_tol}; '
+        f'lsmr_maxiter={best_quality.lsmr_maxiter}; '
+        f'lsmr_iterations={best_quality.lsmr_iterations}'
     )
+
+
+def _lsq_lsmr_maxiter(
+    system: RefractionStaticSolveSystem,
+    *,
+    stage: str,
+) -> int:
+    """Dimension-aware inner LSMR iteration budget for sparse TRF solves."""
+    inner_dimension = min(
+        int(system.augmented_matrix.shape[0]),
+        int(system.augmented_matrix.shape[1]),
+    )
+    if stage == 'first_attempt':
+        budget = max(
+            _LSQ_FIRST_LSMR_MAXITER_MIN,
+            _LSQ_FIRST_LSMR_MAXITER_FACTOR * inner_dimension,
+        )
+    elif stage == 'retry_strict_lsmr':
+        budget = max(
+            _LSQ_RETRY_LSMR_MAXITER_MIN,
+            _LSQ_RETRY_LSMR_MAXITER_FACTOR * inner_dimension,
+        )
+    else:
+        raise RefractionStaticSolverError(f'unknown lsq_linear LSMR stage: {stage}')
+    return int(min(budget, _LSQ_LSMR_MAXITER_CAP))
 
 
 def _run_scaled_lsq_linear_attempt(
@@ -2183,8 +2235,14 @@ def _run_scaled_lsq_linear_attempt(
     tol: float,
     lsmr_tol: float,
     max_iter: int,
+    lsmr_maxiter: int,
     dense: bool,
 ) -> optimize.OptimizeResult:
+    """Run one bounded LSQ attempt.
+
+    ``max_iter`` controls the outer TRF/BVLS iteration budget.  ``lsmr_maxiter``
+    controls the inner LSMR budget and is forwarded only for sparse TRF solves.
+    """
     matrix = system.augmented_matrix * float(solve_scale)
     rhs = np.ascontiguousarray(system.augmented_rhs_s * float(solve_scale))
     solver_matrix: sparse.csr_matrix | np.ndarray
@@ -2205,6 +2263,7 @@ def _run_scaled_lsq_linear_attempt(
             tol=float(tol),
             lsq_solver=lsq_solver,
             lsmr_tol=None if dense else float(lsmr_tol),
+            lsmr_maxiter=None if dense else int(lsmr_maxiter),
             max_iter=int(max_iter),
             verbose=0,
         )
@@ -2216,6 +2275,8 @@ def _run_scaled_lsq_linear_attempt(
         raise RefractionStaticSolverError('solver x shape mismatch')
     result.refraction_solver_stage = stage
     result.refraction_solver_scale = float(solve_scale)
+    result.refraction_solver_lsmr_tol = None if dense else float(lsmr_tol)
+    result.refraction_solver_lsmr_maxiter = None if dense else int(lsmr_maxiter)
     return result
 
 
@@ -2256,13 +2317,20 @@ def _verify_lsq_linear_solution(
     scipy_status = int(getattr(scipy_result, 'status', 0))
     scipy_optimality = float(getattr(scipy_result, 'optimality', np.nan))
     scipy_iterations = int(getattr(scipy_result, 'nit', -1))
+    lsmr_diagnostic = _lsq_lsmr_diagnostic_from_result(scipy_result)
     base_kwargs = {
         'stage': stage,
         'solve_scale': float(solve_scale),
+        'matrix_shape': (
+            int(system.augmented_matrix.shape[0]),
+            int(system.augmented_matrix.shape[1]),
+        ),
+        'matrix_nnz': int(system.augmented_matrix.nnz),
         'scipy_success': scipy_success,
         'scipy_status': scipy_status,
         'scipy_optimality': scipy_optimality,
         'scipy_iterations': scipy_iterations,
+        **lsmr_diagnostic,
     }
     if x.shape != (system.n_parameters,):
         return x, _failed_lsq_quality(
@@ -2313,6 +2381,7 @@ def _verify_lsq_linear_solution(
             unscaled_objective=objective,
             projected_gradient_inf_norm=pg_norm,
             kkt_tolerance=kkt_tolerance,
+            projected_gradient_ratio=_projected_gradient_ratio(pg_norm, kkt_tolerance),
             max_bound_violation=max_bound_violation,
             bound_tolerance=bound_tolerance,
             **base_kwargs,
@@ -2340,6 +2409,7 @@ def _verify_lsq_linear_solution(
     )
     verified = bool(pg_norm <= kkt_tolerance)
     reason = '' if verified else 'projected gradient violates KKT tolerance'
+    projected_gradient_ratio = _projected_gradient_ratio(pg_norm, kkt_tolerance)
     return x, _LsqLinearQualityDiagnostic(
         verified=verified,
         failure_reason=reason,
@@ -2347,20 +2417,83 @@ def _verify_lsq_linear_solution(
         unscaled_objective=objective,
         projected_gradient_inf_norm=pg_norm,
         kkt_tolerance=kkt_tolerance,
+        projected_gradient_ratio=projected_gradient_ratio,
         max_bound_violation=max_bound_violation,
         bound_tolerance=bound_tolerance,
         **base_kwargs,
     )
 
 
+def _lsq_lsmr_diagnostic_from_result(
+    scipy_result: optimize.OptimizeResult | None,
+) -> dict[str, int | float | None]:
+    diagnostic: dict[str, int | float | None] = {
+        'lsmr_tol': None,
+        'lsmr_maxiter': None,
+        'lsmr_stop_code': None,
+        'lsmr_iterations': None,
+        'lsmr_norm_r': None,
+        'lsmr_norm_ar': None,
+        'lsmr_norm_a': None,
+        'lsmr_condition_estimate': None,
+        'lsmr_norm_x': None,
+    }
+    if scipy_result is None:
+        return diagnostic
+    configured_tol = getattr(scipy_result, 'refraction_solver_lsmr_tol', None)
+    configured_maxiter = getattr(scipy_result, 'refraction_solver_lsmr_maxiter', None)
+    diagnostic['lsmr_tol'] = None if configured_tol is None else float(configured_tol)
+    diagnostic['lsmr_maxiter'] = (
+        None if configured_maxiter is None else int(configured_maxiter)
+    )
+    try:
+        unbounded_sol = getattr(scipy_result, 'unbounded_sol', None)
+        if not isinstance(unbounded_sol, (tuple, list)) or len(unbounded_sol) < 8:
+            return diagnostic
+        diagnostic['lsmr_stop_code'] = int(unbounded_sol[1])
+        diagnostic['lsmr_iterations'] = int(unbounded_sol[2])
+        diagnostic['lsmr_norm_r'] = float(unbounded_sol[3])
+        diagnostic['lsmr_norm_ar'] = float(unbounded_sol[4])
+        diagnostic['lsmr_norm_a'] = float(unbounded_sol[5])
+        diagnostic['lsmr_condition_estimate'] = float(unbounded_sol[6])
+        diagnostic['lsmr_norm_x'] = float(unbounded_sol[7])
+    except (TypeError, ValueError, OverflowError):
+        return diagnostic
+    return diagnostic
+
+
+def _projected_gradient_ratio(
+    projected_gradient_inf_norm: float,
+    kkt_tolerance: float,
+) -> float:
+    pg_norm = float(projected_gradient_inf_norm)
+    tolerance = float(kkt_tolerance)
+    if tolerance <= 0.0 or not np.isfinite(tolerance):
+        if pg_norm == 0.0:
+            return 0.0
+        return np.inf
+    return float(pg_norm / tolerance)
+
+
 def _failed_lsq_quality(
     *,
     stage: str,
     solve_scale: float,
+    matrix_shape: tuple[int, int],
+    matrix_nnz: int,
     scipy_success: bool,
     scipy_status: int,
     scipy_optimality: float,
     scipy_iterations: int,
+    lsmr_tol: float | None,
+    lsmr_maxiter: int | None,
+    lsmr_stop_code: int | None,
+    lsmr_iterations: int | None,
+    lsmr_norm_r: float | None,
+    lsmr_norm_ar: float | None,
+    lsmr_norm_a: float | None,
+    lsmr_condition_estimate: float | None,
+    lsmr_norm_x: float | None,
     failure_reason: str,
 ) -> _LsqLinearQualityDiagnostic:
     return _LsqLinearQualityDiagnostic(
@@ -2368,14 +2501,26 @@ def _failed_lsq_quality(
         stage=stage,
         failure_reason=failure_reason,
         solve_scale=float(solve_scale),
+        matrix_shape=matrix_shape,
+        matrix_nnz=int(matrix_nnz),
         scipy_success=bool(scipy_success),
         scipy_status=int(scipy_status),
         scipy_optimality=float(scipy_optimality),
         scipy_iterations=int(scipy_iterations),
+        lsmr_tol=lsmr_tol,
+        lsmr_maxiter=lsmr_maxiter,
+        lsmr_stop_code=lsmr_stop_code,
+        lsmr_iterations=lsmr_iterations,
+        lsmr_norm_r=lsmr_norm_r,
+        lsmr_norm_ar=lsmr_norm_ar,
+        lsmr_norm_a=lsmr_norm_a,
+        lsmr_condition_estimate=lsmr_condition_estimate,
+        lsmr_norm_x=lsmr_norm_x,
         unscaled_augmented_residual_norm=np.inf,
         unscaled_objective=np.inf,
         projected_gradient_inf_norm=np.inf,
         kkt_tolerance=0.0,
+        projected_gradient_ratio=np.inf,
         max_bound_violation=np.inf,
         bound_tolerance=0.0,
     )
@@ -2397,10 +2542,21 @@ def _nonfinite_lsq_quality(
     *,
     stage: str,
     solve_scale: float,
+    matrix_shape: tuple[int, int],
+    matrix_nnz: int,
     scipy_success: bool,
     scipy_status: int,
     scipy_optimality: float,
     scipy_iterations: int,
+    lsmr_tol: float | None,
+    lsmr_maxiter: int | None,
+    lsmr_stop_code: int | None,
+    lsmr_iterations: int | None,
+    lsmr_norm_r: float | None,
+    lsmr_norm_ar: float | None,
+    lsmr_norm_a: float | None,
+    lsmr_condition_estimate: float | None,
+    lsmr_norm_x: float | None,
     residual: np.ndarray,
     objective: float,
     max_bound_violation: float,
@@ -2414,14 +2570,26 @@ def _nonfinite_lsq_quality(
         stage=stage,
         failure_reason='solver residual, gradient, or objective is non-finite',
         solve_scale=float(solve_scale),
+        matrix_shape=matrix_shape,
+        matrix_nnz=int(matrix_nnz),
         scipy_success=bool(scipy_success),
         scipy_status=int(scipy_status),
         scipy_optimality=float(scipy_optimality),
         scipy_iterations=int(scipy_iterations),
+        lsmr_tol=lsmr_tol,
+        lsmr_maxiter=lsmr_maxiter,
+        lsmr_stop_code=lsmr_stop_code,
+        lsmr_iterations=lsmr_iterations,
+        lsmr_norm_r=lsmr_norm_r,
+        lsmr_norm_ar=lsmr_norm_ar,
+        lsmr_norm_a=lsmr_norm_a,
+        lsmr_condition_estimate=lsmr_condition_estimate,
+        lsmr_norm_x=lsmr_norm_x,
         unscaled_augmented_residual_norm=residual_norm,
         unscaled_objective=float(objective),
         projected_gradient_inf_norm=np.inf,
         kkt_tolerance=0.0,
+        projected_gradient_ratio=np.inf,
         max_bound_violation=float(max_bound_violation),
         bound_tolerance=float(bound_tolerance),
     )
@@ -2639,10 +2807,39 @@ def _lsq_quality_json(diagnostic: _LsqLinearQualityDiagnostic) -> dict[str, Any]
         'stage': diagnostic.stage,
         'failure_reason': diagnostic.failure_reason,
         'solve_scale': _json_finite_float(diagnostic.solve_scale),
+        'matrix_shape': [
+            int(diagnostic.matrix_shape[0]),
+            int(diagnostic.matrix_shape[1]),
+        ],
+        'matrix_nnz': int(diagnostic.matrix_nnz),
         'scipy_success': bool(diagnostic.scipy_success),
         'scipy_status': int(diagnostic.scipy_status),
         'scipy_optimality': _json_finite_float(diagnostic.scipy_optimality),
         'scipy_iterations': int(diagnostic.scipy_iterations),
+        'outer_success': bool(diagnostic.scipy_success),
+        'outer_status': int(diagnostic.scipy_status),
+        'outer_iterations': int(diagnostic.scipy_iterations),
+        'lsmr_tol': _optional_json_finite_float(diagnostic.lsmr_tol),
+        'lsmr_maxiter': (
+            None if diagnostic.lsmr_maxiter is None else int(diagnostic.lsmr_maxiter)
+        ),
+        'lsmr_stop_code': (
+            None
+            if diagnostic.lsmr_stop_code is None
+            else int(diagnostic.lsmr_stop_code)
+        ),
+        'lsmr_iterations': (
+            None
+            if diagnostic.lsmr_iterations is None
+            else int(diagnostic.lsmr_iterations)
+        ),
+        'lsmr_norm_r': _optional_json_finite_float(diagnostic.lsmr_norm_r),
+        'lsmr_norm_ar': _optional_json_finite_float(diagnostic.lsmr_norm_ar),
+        'lsmr_norm_a': _optional_json_finite_float(diagnostic.lsmr_norm_a),
+        'lsmr_condition_estimate': _optional_json_finite_float(
+            diagnostic.lsmr_condition_estimate
+        ),
+        'lsmr_norm_x': _optional_json_finite_float(diagnostic.lsmr_norm_x),
         'unscaled_augmented_residual_norm': _json_finite_float(
             diagnostic.unscaled_augmented_residual_norm
         ),
@@ -2651,6 +2848,9 @@ def _lsq_quality_json(diagnostic: _LsqLinearQualityDiagnostic) -> dict[str, Any]
             diagnostic.projected_gradient_inf_norm
         ),
         'kkt_tolerance': _json_finite_float(diagnostic.kkt_tolerance),
+        'projected_gradient_ratio': _json_finite_float(
+            diagnostic.projected_gradient_ratio
+        ),
         'max_bound_violation': _json_finite_float(diagnostic.max_bound_violation),
         'bound_tolerance': _json_finite_float(diagnostic.bound_tolerance),
     }
@@ -3252,6 +3452,12 @@ def _optional_float(value: float | None) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _optional_json_finite_float(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return _json_finite_float(value)
 
 
 def _json_finite_float(value: float) -> float | None:
