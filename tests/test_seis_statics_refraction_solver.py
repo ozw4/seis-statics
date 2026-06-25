@@ -1155,6 +1155,33 @@ def test_refraction_solver_sparse_rank_zero_reports_largest_solver_only() -> Non
     assert diagnostic.requested_smallest_count == 0
 
 
+def _sparse_banded_rank_control_matrix(n: int) -> sparse.csr_matrix:
+    diagonal = np.ones(int(n), dtype=np.float64)
+    subdiagonal = np.linspace(0.05, 0.15, int(n) - 1, dtype=np.float64)
+    return sparse.diags(
+        diagonals=(diagonal, subdiagonal),
+        offsets=(0, -1),
+        format='csr',
+    )
+
+
+def _sparse_banded_rank_deficient_matrix(
+    n: int,
+    *,
+    nullity: int,
+) -> sparse.csr_matrix:
+    diagonal = np.ones(int(n), dtype=np.float64)
+    diagonal[-int(nullity) :] = 0.0
+    subdiagonal = np.linspace(0.05, 0.15, int(n) - 1, dtype=np.float64)
+    if nullity > 1:
+        subdiagonal[-(int(nullity) - 1) :] = 0.0
+    return sparse.diags(
+        diagonals=(diagonal, subdiagonal),
+        offsets=(0, -1),
+        format='csr',
+    )
+
+
 def test_refraction_solver_large_sparse_exact_zero_is_not_full_rank() -> None:
     n = 1100
     diagnostic = solver_module._sparse_column_scaled_numerical_rank(
@@ -1164,19 +1191,21 @@ def test_refraction_solver_large_sparse_exact_zero_is_not_full_rank() -> None:
         rtol=1.0e-10,
     )
 
-    assert diagnostic.method == 'sparse_normal_eigsh'
-    assert diagnostic.sparse_solver_name == 'propack_svds+eigsh_normal'
+    assert diagnostic.method == 'sparse_structural_rank'
+    assert diagnostic.structural_rank == n - 1
     assert diagnostic.estimated_rank == n - 1
     assert diagnostic.certification_status == 'rank_deficient'
-    assert diagnostic.requested_smallest_count == 1
-    assert diagnostic.returned_smallest_count == 1
-    assert diagnostic.critical_singular_value <= diagnostic.threshold
+    assert diagnostic.failure_reason == 'structural rank is below expected rank'
+    assert diagnostic.requested_smallest_count == 0
 
 
 def test_refraction_solver_large_sparse_full_rank_control_is_certified() -> None:
     n = 1100
+    small_control = _sparse_banded_rank_control_matrix(32)
+    assert np.linalg.matrix_rank(small_control.toarray()) == 32
+
     diagnostic = solver_module._sparse_column_scaled_numerical_rank(
-        sparse.eye(n, format='csr', dtype=np.float64),
+        _sparse_banded_rank_control_matrix(n),
         expected_rank=n,
         expected_nullity=0,
         rtol=1.0e-10,
@@ -1184,20 +1213,31 @@ def test_refraction_solver_large_sparse_full_rank_control_is_certified() -> None
 
     assert diagnostic.estimated_rank == n
     assert diagnostic.certification_status == 'certified'
+    assert diagnostic.structural_rank == n
     assert diagnostic.critical_singular_value > diagnostic.threshold
     assert diagnostic.max_singular_triplet_residual < 1.0e-8
+    assert diagnostic.selected_candidate in {'propack_svds', 'eigsh_normal'}
 
 
 def test_refraction_solver_large_sparse_allowed_nullity_boundary() -> None:
     n = 1100
+    one_null_fixture = _sparse_banded_rank_deficient_matrix(n, nullity=1)
+    two_null_fixture = _sparse_banded_rank_deficient_matrix(n, nullity=2)
+    assert np.linalg.matrix_rank(
+        _sparse_banded_rank_deficient_matrix(32, nullity=1).toarray()
+    ) == 31
+    assert np.linalg.matrix_rank(
+        _sparse_banded_rank_deficient_matrix(32, nullity=2).toarray()
+    ) == 30
+
     one_null = solver_module._sparse_column_scaled_numerical_rank(
-        sparse.diags(np.r_[np.ones(n - 1), 0.0], format='csr'),
+        one_null_fixture,
         expected_rank=n - 1,
         expected_nullity=1,
         rtol=1.0e-10,
     )
     two_null = solver_module._sparse_column_scaled_numerical_rank(
-        sparse.diags(np.r_[np.ones(n - 2), 0.0, 0.0], format='csr'),
+        two_null_fixture,
         expected_rank=n - 1,
         expected_nullity=1,
         rtol=1.0e-10,
@@ -1239,7 +1279,7 @@ def test_refraction_solver_sparse_near_threshold_policy() -> None:
         )
 
 
-def test_refraction_solver_sparse_nonconvergence_does_not_certify(
+def test_refraction_solver_sparse_single_candidate_nonconvergence_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_svds(*args: object, **kwargs: object) -> object:
@@ -1247,16 +1287,63 @@ def test_refraction_solver_sparse_nonconvergence_does_not_certify(
 
     monkeypatch.setattr(solver_module.sparse_linalg, 'svds', fail_svds)
 
-    with pytest.raises(RefractionStaticSolverError, match='did not converge'):
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(1100),
+        expected_rank=1100,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.selected_candidate == 'eigsh_normal'
+    assert diagnostic.rejected_candidate_names == ('propack_svds',)
+    assert 'did not converge' in diagnostic.rejected_candidate_reasons[0]
+
+
+def test_refraction_solver_sparse_all_candidates_invalid_does_not_certify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_normal_triplets = solver_module._sparse_normal_singular_triplets
+
+    def fail_svds(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        del scaled_matrix, k, name
+        raise RefractionStaticSolverError('propack failed')
+
+    def fail_normal(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        which: object,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        if which == 'LA':
+            return original_normal_triplets(
+                scaled_matrix,
+                k=k,
+                which='LA',
+                name=name,
+            )
+        del scaled_matrix, k, name
+        raise RefractionStaticSolverError('normal failed')
+
+    monkeypatch.setattr(solver_module, '_sparse_svds_singular_triplets', fail_svds)
+    monkeypatch.setattr(solver_module, '_sparse_normal_singular_triplets', fail_normal)
+
+    with pytest.raises(RefractionStaticSolverError, match='certification unavailable'):
         solver_module._sparse_column_scaled_numerical_rank(
-            sparse.eye(1100, format='csr', dtype=np.float64),
+            _sparse_banded_rank_control_matrix(1100),
             expected_rank=1100,
             expected_nullity=0,
             rtol=1.0e-10,
         )
 
 
-def test_refraction_solver_sparse_bad_triplet_residual_does_not_certify(
+def test_refraction_solver_sparse_bad_candidate_residual_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def bad_triplets(
@@ -1272,16 +1359,22 @@ def test_refraction_solver_sparse_bad_triplet_residual_does_not_certify(
 
     monkeypatch.setattr(solver_module, '_sparse_svds_singular_triplets', bad_triplets)
 
-    with pytest.raises(RefractionStaticSolverError, match='residual is too large'):
-        solver_module._sparse_column_scaled_numerical_rank(
-            sparse.eye(1100, format='csr', dtype=np.float64),
-            expected_rank=1100,
-            expected_nullity=0,
-            rtol=1.0e-10,
-        )
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(1100),
+        expected_rank=1100,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.selected_candidate == 'eigsh_normal'
+    assert diagnostic.rejected_candidate_names == ('propack_svds',)
+    assert diagnostic.rejected_candidate_reasons == (
+        'singular triplet residual is too large',
+    )
 
 
-def test_refraction_solver_sparse_bad_allowed_null_triplet_residual_fails(
+def test_refraction_solver_sparse_bad_allowed_null_triplet_residual_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def boundary_triplets(
@@ -1324,16 +1417,19 @@ def test_refraction_solver_sparse_bad_allowed_null_triplet_residual_fails(
         normal_triplets,
     )
 
-    with pytest.raises(RefractionStaticSolverError, match='residual is too large'):
-        solver_module._sparse_column_scaled_numerical_rank(
-            sparse.eye(4, format='csr', dtype=np.float64),
-            expected_rank=3,
-            expected_nullity=1,
-            rtol=1.0e-10,
-        )
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(4),
+        expected_rank=3,
+        expected_nullity=1,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.selected_candidate == 'eigsh_normal'
+    assert diagnostic.rejected_candidate_names == ('propack_svds',)
 
 
-def test_refraction_solver_sparse_bad_corroborating_boundary_residual_fails(
+def test_refraction_solver_sparse_bad_corroborating_boundary_residual_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def good_boundary_triplets(
@@ -1374,13 +1470,16 @@ def test_refraction_solver_sparse_bad_corroborating_boundary_residual_fails(
         normal_triplets,
     )
 
-    with pytest.raises(RefractionStaticSolverError, match='residual is too large'):
-        solver_module._sparse_column_scaled_numerical_rank(
-            sparse.eye(4, format='csr', dtype=np.float64),
-            expected_rank=4,
-            expected_nullity=0,
-            rtol=1.0e-10,
-        )
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(4),
+        expected_rank=4,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'certified'
+    assert diagnostic.selected_candidate == 'propack_svds'
+    assert diagnostic.rejected_candidate_names == ('eigsh_normal',)
 
 
 def test_refraction_lsq_scale_accounts_for_large_matrix_with_nonzero_rhs() -> None:
@@ -1441,7 +1540,7 @@ def test_refraction_solver_large_sparse_global_slowness_duplicate_path_regressio
 
     with pytest.raises(
         RefractionStaticSolverError,
-        match='physical system is not identifiable',
+        match='certification unavailable',
     ):
         solve_refraction_static_design_least_squares(
             design,

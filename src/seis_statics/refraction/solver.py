@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
+from inspect import signature
 from typing import Any, Literal
 
 import numpy as np
@@ -42,6 +43,9 @@ from seis_statics.refraction.types import (
 )
 
 
+_SVDS_SIGNATURE = signature(sparse_linalg.svds)
+
+
 class RefractionStaticSolverError(ValueError):
     """Raised when refraction static solver inputs are inconsistent."""
 
@@ -68,12 +72,31 @@ class _NumericalRankDiagnostic:
     critical_singular_value: float
     largest_singular_value: float
     rtol: float
+    structural_rank: int = -1
     sparse_solver_name: str = ''
     certification_status: str = 'not_applicable'
     requested_smallest_count: int = 0
     returned_smallest_count: int = 0
     max_singular_triplet_residual: float = 0.0
     failure_reason: str = ''
+    candidate_solver_names: tuple[str, ...] = ()
+    candidate_critical_values: tuple[float, ...] = ()
+    candidate_residuals: tuple[float, ...] = ()
+    rejected_candidate_names: tuple[str, ...] = ()
+    rejected_candidate_reasons: tuple[str, ...] = ()
+    selected_candidate: str = ''
+
+
+@dataclass(frozen=True)
+class _SparseRankCandidate:
+    solver_name: str
+    critical_singular_value: float
+    max_residual: float
+    residual_tolerance: float
+    valid: bool
+    failure_reason: str
+    returned_count: int
+    estimated_rank_if_deficient: int
 
 
 @dataclass(frozen=True)
@@ -1154,6 +1177,7 @@ def _column_scaled_numerical_rank(
     csr = matrix.tocsr().astype(np.float64, copy=False)
     _validate_finite(csr.data, name='physical_matrix.data')
     n_rows, n_columns = map(int, csr.shape)
+    structural_rank = int(sparse.csgraph.structural_rank(csr))
     if expected_rank > min(n_rows, n_columns):
         return _NumericalRankDiagnostic(
             method='row_count',
@@ -1167,6 +1191,7 @@ def _column_scaled_numerical_rank(
             critical_singular_value=0.0,
             largest_singular_value=0.0,
             rtol=float(rtol),
+            structural_rank=structural_rank,
         )
     scaled = _column_l2_scaled_matrix(csr)
     if n_rows * n_columns <= _DENSE_IDENTIFIABILITY_MAX_ELEMENTS:
@@ -1204,6 +1229,7 @@ def _dense_column_scaled_numerical_rank(
     expected_nullity: int,
     rtol: float,
 ) -> _NumericalRankDiagnostic:
+    structural_rank = int(sparse.csgraph.structural_rank(scaled_matrix))
     dense = scaled_matrix.toarray()
     singular_values = np.linalg.svd(dense, compute_uv=False)
     singular_values = np.asarray(singular_values, dtype=np.float64)
@@ -1227,6 +1253,7 @@ def _dense_column_scaled_numerical_rank(
         critical_singular_value=critical,
         largest_singular_value=largest,
         rtol=float(rtol),
+        structural_rank=structural_rank,
     )
 
 
@@ -1239,13 +1266,28 @@ def _sparse_column_scaled_numerical_rank(
 ) -> _NumericalRankDiagnostic:
     n_rows, n_columns = map(int, scaled_matrix.shape)
     min_dim = min(n_rows, n_columns)
+    structural_rank = int(sparse.csgraph.structural_rank(scaled_matrix))
     requested_smallest_count = 0
     returned_smallest_count = 0
     max_residual = 0.0
     failure_reason = ''
     method = 'sparse_empty'
     sparse_solver_name = ''
-    if min_dim == 0:
+    candidate_solver_names: tuple[str, ...] = ()
+    candidate_critical_values: tuple[float, ...] = ()
+    candidate_residuals: tuple[float, ...] = ()
+    rejected_candidate_names: tuple[str, ...] = ()
+    rejected_candidate_reasons: tuple[str, ...] = ()
+    selected_candidate = ''
+    if structural_rank < int(expected_rank):
+        largest = 0.0
+        threshold = 0.0
+        critical = 0.0
+        estimated_rank = int(structural_rank)
+        certification_status = 'rank_deficient'
+        method = 'sparse_structural_rank'
+        failure_reason = 'structural rank is below expected rank'
+    elif min_dim == 0:
         largest = 0.0
         threshold = 0.0
         estimated_rank = 0
@@ -1326,74 +1368,91 @@ def _sparse_column_scaled_numerical_rank(
             else:
                 requested_smallest_count = allowed_small_count + 1
                 sparse_solver_name = 'propack_svds+eigsh_normal'
-                boundary_triplets = _sparse_svds_singular_triplets(
+                candidates = _sparse_rank_candidates(
                     scaled_matrix,
-                    k=requested_smallest_count,
-                    name='physical_matrix smallest sparse singular triplets',
-                )
-                corroborating_triplets = _sparse_normal_singular_triplets(
-                    scaled_matrix,
-                    k=requested_smallest_count,
-                    which='SA',
-                    name='physical_matrix corroborating sparse singular values',
-                )
-                corroborating_values = corroborating_triplets.singular_values
-                returned_smallest_count = int(boundary_triplets.singular_values.size)
-                if returned_smallest_count < requested_smallest_count:
-                    raise RefractionStaticSolverError(
-                        'sparse physical identifiability returned too few '
-                        'smallest singular triplets'
-                    )
-                boundary_critical = float(
-                    boundary_triplets.singular_values[allowed_small_count]
-                )
-                corroborating_critical = float(
-                    corroborating_values[allowed_small_count]
-                )
-                critical = min(boundary_critical, corroborating_critical)
-                if _critical_singular_value_is_ambiguous(
-                    critical,
+                    requested_count=requested_smallest_count,
+                    allowed_small_count=allowed_small_count,
                     threshold=threshold,
-                    scaled_matrix=scaled_matrix,
                     largest=largest,
-                ):
+                    residual_tolerance=residual_tolerance,
+                )
+                valid_candidates = tuple(
+                    candidate for candidate in candidates if candidate.valid
+                )
+                returned_smallest_count = max(
+                    (candidate.returned_count for candidate in candidates),
+                    default=0,
+                )
+                if not valid_candidates:
+                    rejected = ', '.join(
+                        f'{candidate.solver_name}: {candidate.failure_reason}'
+                        for candidate in candidates
+                    )
                     raise RefractionStaticSolverError(
-                        'sparse physical identifiability critical singular value '
-                        'is too close to the rank threshold to certify'
+                        'sparse physical identifiability certification unavailable'
+                        + (f' ({rejected})' if rejected else '')
                     )
-                if critical > threshold:
-                    certification_residual = max(
-                        boundary_triplets.max_residual,
-                        corroborating_triplets.max_residual,
+                critical = min(
+                    candidate.critical_singular_value for candidate in valid_candidates
+                )
+                max_residual = max(
+                    max_residual,
+                    max(candidate.max_residual for candidate in valid_candidates),
+                )
+                deficient_candidates = tuple(
+                    candidate
+                    for candidate in valid_candidates
+                    if candidate.critical_singular_value <= threshold
+                )
+                full_rank_candidates = tuple(
+                    candidate
+                    for candidate in valid_candidates
+                    if candidate.critical_singular_value > threshold
+                )
+                if deficient_candidates and full_rank_candidates:
+                    raise RefractionStaticSolverError(
+                        'sparse physical identifiability certification unavailable '
+                        'due to conflicting sparse rank candidates'
                     )
-                    max_residual = max(max_residual, certification_residual)
-                    if certification_residual > residual_tolerance:
-                        raise RefractionStaticSolverError(
-                            'sparse physical identifiability smallest singular '
-                            'triplet residual is too large'
-                        )
+                if full_rank_candidates:
+                    selected = min(
+                        full_rank_candidates,
+                        key=lambda candidate: candidate.critical_singular_value,
+                    )
                     estimated_rank = int(expected_rank)
                     certification_status = 'certified'
+                    selected_candidate = selected.solver_name
                 else:
-                    n_small = int(
-                        np.count_nonzero(
-                            np.minimum(
-                                boundary_triplets.singular_values,
-                                corroborating_values,
-                            )
-                            <= threshold
-                        )
+                    selected = min(
+                        deficient_candidates,
+                        key=lambda candidate: candidate.estimated_rank_if_deficient,
                     )
-                    estimated_rank = max(0, min_dim - n_small)
+                    estimated_rank = selected.estimated_rank_if_deficient
                     certification_status = 'rank_deficient'
-                    max_residual = max(
-                        max_residual,
-                        boundary_triplets.max_residual,
-                        corroborating_triplets.max_residual,
-                    )
+                    selected_candidate = selected.solver_name
                     failure_reason = (
                         'critical singular value is not above threshold'
                     )
+                candidate_solver_names = tuple(
+                    candidate.solver_name for candidate in candidates
+                )
+                candidate_critical_values = tuple(
+                    float(candidate.critical_singular_value)
+                    for candidate in candidates
+                )
+                candidate_residuals = tuple(
+                    float(candidate.max_residual) for candidate in candidates
+                )
+                rejected_candidate_names = tuple(
+                    candidate.solver_name
+                    for candidate in candidates
+                    if not candidate.valid
+                )
+                rejected_candidate_reasons = tuple(
+                    candidate.failure_reason
+                    for candidate in candidates
+                    if not candidate.valid
+                )
     return _NumericalRankDiagnostic(
         method=method,
         n_rows=n_rows,
@@ -1406,12 +1465,19 @@ def _sparse_column_scaled_numerical_rank(
         critical_singular_value=float(critical),
         largest_singular_value=float(largest),
         rtol=float(rtol),
+        structural_rank=structural_rank,
         sparse_solver_name=sparse_solver_name,
         certification_status=certification_status,
         requested_smallest_count=int(requested_smallest_count),
         returned_smallest_count=int(returned_smallest_count),
         max_singular_triplet_residual=float(max_residual),
         failure_reason=failure_reason,
+        candidate_solver_names=candidate_solver_names,
+        candidate_critical_values=candidate_critical_values,
+        candidate_residuals=candidate_residuals,
+        rejected_candidate_names=rejected_candidate_names,
+        rejected_candidate_reasons=rejected_candidate_reasons,
+        selected_candidate=selected_candidate,
     )
 
 
@@ -1420,6 +1486,176 @@ class _SparseSingularTripletDiagnostic:
     singular_values: np.ndarray
     max_residual: float
     residuals: np.ndarray | None = None
+
+
+def _sparse_rank_candidates(
+    scaled_matrix: sparse.csr_matrix,
+    *,
+    requested_count: int,
+    allowed_small_count: int,
+    threshold: float,
+    largest: float,
+    residual_tolerance: float,
+) -> tuple[_SparseRankCandidate, ...]:
+    candidates: list[_SparseRankCandidate] = []
+    candidate_specs = (
+        (
+            'propack_svds',
+            lambda: _sparse_svds_singular_triplets(
+                scaled_matrix,
+                k=requested_count,
+                name='physical_matrix smallest sparse singular triplets',
+            ),
+        ),
+        (
+            'eigsh_normal',
+            lambda: _sparse_normal_singular_triplets(
+                scaled_matrix,
+                k=requested_count,
+                which='SA',
+                name='physical_matrix corroborating sparse singular values',
+            ),
+        ),
+    )
+    for solver_name, solve in candidate_specs:
+        try:
+            triplets = solve()
+        except RefractionStaticSolverError as exc:
+            candidates.append(
+                _SparseRankCandidate(
+                    solver_name=solver_name,
+                    critical_singular_value=float('nan'),
+                    max_residual=float('nan'),
+                    residual_tolerance=float(residual_tolerance),
+                    valid=False,
+                    failure_reason=str(exc),
+                    returned_count=0,
+                    estimated_rank_if_deficient=0,
+                )
+            )
+            continue
+        candidates.append(
+            _sparse_rank_candidate_from_triplets(
+                triplets,
+                solver_name=solver_name,
+                requested_count=requested_count,
+                allowed_small_count=allowed_small_count,
+                threshold=threshold,
+                largest=largest,
+                residual_tolerance=residual_tolerance,
+                min_dim=min(map(int, scaled_matrix.shape)),
+                scaled_matrix=scaled_matrix,
+            )
+        )
+    return tuple(candidates)
+
+
+def _sparse_rank_candidate_from_triplets(
+    triplets: _SparseSingularTripletDiagnostic,
+    *,
+    solver_name: str,
+    requested_count: int,
+    allowed_small_count: int,
+    threshold: float,
+    largest: float,
+    residual_tolerance: float,
+    min_dim: int,
+    scaled_matrix: sparse.csr_matrix,
+) -> _SparseRankCandidate:
+    values = np.asarray(triplets.singular_values, dtype=np.float64)
+    returned_count = int(values.size)
+    if returned_count < int(requested_count):
+        return _invalid_sparse_rank_candidate(
+            solver_name=solver_name,
+            critical=float('nan'),
+            residual=float(triplets.max_residual),
+            residual_tolerance=residual_tolerance,
+            returned_count=returned_count,
+            reason='returned too few smallest singular triplets',
+        )
+    if not np.all(np.isfinite(values)):
+        return _invalid_sparse_rank_candidate(
+            solver_name=solver_name,
+            critical=float('nan'),
+            residual=float(triplets.max_residual),
+            residual_tolerance=residual_tolerance,
+            returned_count=returned_count,
+            reason='singular values are not finite',
+        )
+    critical = float(values[int(allowed_small_count)])
+    if triplets.residuals is None:
+        residuals = np.asarray([triplets.max_residual], dtype=np.float64)
+    else:
+        residuals = np.asarray(triplets.residuals, dtype=np.float64)
+    reported_max_residual = float(triplets.max_residual)
+    if not np.all(np.isfinite(residuals)) or not np.isfinite(reported_max_residual):
+        return _invalid_sparse_rank_candidate(
+            solver_name=solver_name,
+            critical=critical,
+            residual=reported_max_residual,
+            residual_tolerance=residual_tolerance,
+            returned_count=returned_count,
+            reason='singular triplet residual is not finite',
+        )
+    max_residual = float(
+        np.max(residuals) if residuals.size else triplets.max_residual
+    )
+    max_residual = max(max_residual, reported_max_residual)
+    if max_residual > float(residual_tolerance):
+        return _invalid_sparse_rank_candidate(
+            solver_name=solver_name,
+            critical=critical,
+            residual=max_residual,
+            residual_tolerance=residual_tolerance,
+            returned_count=returned_count,
+            reason='singular triplet residual is too large',
+        )
+    if _critical_singular_value_is_ambiguous(
+        critical,
+        threshold=threshold,
+        scaled_matrix=scaled_matrix,
+        largest=largest,
+    ):
+        return _invalid_sparse_rank_candidate(
+            solver_name=solver_name,
+            critical=critical,
+            residual=max_residual,
+            residual_tolerance=residual_tolerance,
+            returned_count=returned_count,
+            reason='critical singular value is too close to the rank threshold',
+        )
+    n_small = int(np.count_nonzero(values <= float(threshold)))
+    return _SparseRankCandidate(
+        solver_name=solver_name,
+        critical_singular_value=critical,
+        max_residual=max_residual,
+        residual_tolerance=float(residual_tolerance),
+        valid=True,
+        failure_reason='',
+        returned_count=returned_count,
+        estimated_rank_if_deficient=max(0, int(min_dim) - n_small),
+    )
+
+
+def _invalid_sparse_rank_candidate(
+    *,
+    solver_name: str,
+    critical: float,
+    residual: float,
+    residual_tolerance: float,
+    returned_count: int,
+    reason: str,
+) -> _SparseRankCandidate:
+    return _SparseRankCandidate(
+        solver_name=solver_name,
+        critical_singular_value=float(critical),
+        max_residual=float(residual),
+        residual_tolerance=float(residual_tolerance),
+        valid=False,
+        failure_reason=reason,
+        returned_count=int(returned_count),
+        estimated_rank_if_deficient=0,
+    )
 
 
 def _sparse_normal_singular_triplets(
@@ -1523,7 +1759,7 @@ def _sparse_svds_singular_triplets(
     name: str,
 ) -> _SparseSingularTripletDiagnostic:
     try:
-        left_vectors, values, right_vectors_t = sparse_linalg.svds(
+        left_vectors, values, right_vectors_t = _svds_with_deterministic_state(
             scaled_matrix,
             k=int(k),
             which='SM',
@@ -1573,6 +1809,28 @@ def _sparse_svds_singular_triplets(
         max_residual=float(np.max(residual_array)) if residual_array.size else 0.0,
         residuals=residual_array,
     )
+
+
+def _svds_with_deterministic_state(
+    scaled_matrix: sparse.csr_matrix,
+    **kwargs: Any,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    signature = _SVDS_SIGNATURE
+    call_kwargs = dict(kwargs)
+    if 'v0' in signature.parameters:
+        call_kwargs['v0'] = _deterministic_nonzero_vector(
+            min(map(int, scaled_matrix.shape))
+        )
+    if 'random_state' in signature.parameters:
+        call_kwargs['random_state'] = 0
+    result = sparse_linalg.svds(scaled_matrix, **call_kwargs)
+    return result
+
+
+def _deterministic_nonzero_vector(size: int) -> np.ndarray:
+    if size <= 0:
+        return np.empty(0, dtype=np.float64)
+    return np.linspace(1.0, 2.0, int(size), dtype=np.float64)
 
 
 def _sparse_singular_value_from_normal_vector(
@@ -3384,6 +3642,7 @@ def _identifiability_diagnostic_json(
         'critical_singular_value': float(diagnostic.critical_singular_value),
         'largest_singular_value': float(diagnostic.largest_singular_value),
         'rtol': float(diagnostic.rtol),
+        'structural_rank': int(diagnostic.structural_rank),
         'sparse_solver_name': diagnostic.sparse_solver_name,
         'certification_status': diagnostic.certification_status,
         'requested_smallest_count': int(diagnostic.requested_smallest_count),
@@ -3392,7 +3651,23 @@ def _identifiability_diagnostic_json(
             diagnostic.max_singular_triplet_residual
         ),
         'failure_reason': diagnostic.failure_reason,
+        'candidate_solver_names': list(diagnostic.candidate_solver_names),
+        'candidate_critical_values': [
+            _json_finite_float(value)
+            for value in diagnostic.candidate_critical_values
+        ],
+        'candidate_residuals': [
+            _json_finite_float(value) for value in diagnostic.candidate_residuals
+        ],
+        'rejected_candidate_names': list(diagnostic.rejected_candidate_names),
+        'rejected_candidate_reasons': list(diagnostic.rejected_candidate_reasons),
+        'selected_candidate': diagnostic.selected_candidate,
     }
+
+
+def _json_finite_float(value: float) -> float | None:
+    number = float(value)
+    return number if np.isfinite(number) else None
 
 
 def _solver_design_qc(
