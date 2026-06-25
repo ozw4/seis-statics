@@ -76,6 +76,18 @@ class ResolvedFloatingDatum:
 
 
 @dataclass(frozen=True)
+class RefractionSmoothedFloatingDatum:
+    """Coordinate-aware smoothed floating datum elevations."""
+
+    node_elevation_m: np.ndarray
+    source_elevation_m: np.ndarray
+    receiver_elevation_m: np.ndarray
+    smoothing_coordinate_m: np.ndarray
+    smoothing_order: np.ndarray
+    qc: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class RefractionDatumEndpointResult:
     """Endpoint-level datum and replacement static composition."""
 
@@ -194,6 +206,109 @@ def smooth_refraction_floating_datum_elevation(
         else:
             out[index] = float(np.median(sample))
     return np.ascontiguousarray(out, dtype=np.float64)
+
+
+def resolve_smoothed_refraction_floating_datum(
+    *,
+    node_id: np.ndarray,
+    node_x_m: np.ndarray,
+    node_y_m: np.ndarray,
+    node_surface_elevation_m: np.ndarray,
+    source_node_id: np.ndarray,
+    receiver_node_id: np.ndarray,
+    window_nodes: int,
+    radius_m: float | None = None,
+    method: Literal['moving_average', 'median'] = 'moving_average',
+) -> RefractionSmoothedFloatingDatum:
+    """Resolve smoothed node topography and project it to endpoints."""
+    nodes = _coerce_1d_integer(node_id, name='node_id')
+    node_count = int(nodes.shape[0])
+    if np.unique(nodes).shape[0] != node_count:
+        raise RefractionDatumError('node_id values must be unique')
+    x = _coerce_1d_float(node_x_m, name='node_x_m', expected_shape=nodes.shape)
+    y = _coerce_1d_float(node_y_m, name='node_y_m', expected_shape=nodes.shape)
+    elevation = _coerce_1d_float(
+        node_surface_elevation_m,
+        name='node_surface_elevation_m',
+        expected_shape=nodes.shape,
+    )
+    source_nodes = _coerce_1d_integer(source_node_id, name='source_node_id')
+    receiver_nodes = _coerce_1d_integer(receiver_node_id, name='receiver_node_id')
+    window = _coerce_positive_int(
+        window_nodes,
+        name='window_nodes',
+        error_type=RefractionDatumError,
+    )
+    if window % 2 == 0:
+        raise RefractionDatumError('window_nodes must be odd')
+    if method not in {'moving_average', 'median'}:
+        raise RefractionDatumError(
+            "method must be 'moving_average' or 'median'"
+        )
+    radius = _coerce_smoothing_radius(radius_m)
+
+    coordinate, coordinate_mode = _floating_datum_smoothing_coordinate(
+        node_id=nodes,
+        x_m=x,
+        y_m=y,
+    )
+    order = _floating_datum_smoothing_order(
+        node_id=nodes,
+        smoothing_coordinate_m=coordinate,
+        coordinate_mode=coordinate_mode,
+    )
+    window_smoothed = _smooth_by_ordered_window(
+        elevation_m=elevation,
+        order=order,
+        window_nodes=window,
+        method=method,
+    )
+    if radius is None or coordinate_mode == 'node_order_fallback':
+        smoothed = window_smoothed
+        radius_sample_count = np.zeros(node_count, dtype=np.int64)
+        n_radius_fallback = 0
+    else:
+        smoothed, radius_sample_count, n_radius_fallback = _smooth_by_radius_with_window_fallback(
+            elevation_m=elevation,
+            smoothing_coordinate_m=coordinate,
+            window_smoothed_elevation_m=window_smoothed,
+            radius_m=radius,
+            method=method,
+        )
+
+    source = _project_smoothed_datum_to_endpoint(
+        endpoint_node_id=source_nodes,
+        node_id=nodes,
+        smoothed_elevation_m=smoothed,
+        endpoint_name='source_node_id',
+    )
+    receiver = _project_smoothed_datum_to_endpoint(
+        endpoint_node_id=receiver_nodes,
+        node_id=nodes,
+        smoothed_elevation_m=smoothed,
+        endpoint_name='receiver_node_id',
+    )
+    qc = _smoothed_floating_datum_qc(
+        coordinate_mode=coordinate_mode,
+        method=method,
+        window_nodes=window,
+        radius_m=radius,
+        node_id=nodes,
+        smoothing_coordinate_m=coordinate,
+        node_elevation_m=smoothed,
+        radius_sample_count=radius_sample_count,
+        n_radius_window_fallback_nodes=n_radius_fallback,
+        n_source_endpoints=int(source_nodes.shape[0]),
+        n_receiver_endpoints=int(receiver_nodes.shape[0]),
+    )
+    return RefractionSmoothedFloatingDatum(
+        node_elevation_m=np.ascontiguousarray(smoothed, dtype=np.float64),
+        source_elevation_m=np.ascontiguousarray(source, dtype=np.float64),
+        receiver_elevation_m=np.ascontiguousarray(receiver, dtype=np.float64),
+        smoothing_coordinate_m=np.ascontiguousarray(coordinate, dtype=np.float64),
+        smoothing_order=np.ascontiguousarray(order, dtype=np.int64),
+        qc=qc,
+    )
 
 
 def build_refraction_endpoint_datum_statics(
@@ -776,6 +891,188 @@ def _resolved_datum(
     return _coerce_datum_elevation(value, name=name, expected_shape=expected_shape)
 
 
+def _coerce_smoothing_radius(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return _coerce_positive_finite_float(
+        value,
+        name='radius_m',
+        error_type=RefractionDatumError,
+    )
+
+
+def _floating_datum_smoothing_coordinate(
+    *,
+    node_id: np.ndarray,
+    x_m: np.ndarray,
+    y_m: np.ndarray,
+) -> tuple[np.ndarray, Literal['line_2d_path_distance', 'node_order_fallback']]:
+    coordinate = np.full(x_m.shape, np.nan, dtype=np.float64)
+    finite = np.isfinite(x_m) & np.isfinite(y_m)
+    if np.count_nonzero(finite) < 2:
+        return coordinate, 'node_order_fallback'
+
+    xy = np.column_stack((x_m[finite], y_m[finite])).astype(np.float64, copy=False)
+    origin = np.mean(xy, axis=0)
+    centered = xy - origin
+    if not np.any(np.isfinite(centered)) or float(np.max(np.hypot(centered[:, 0], centered[:, 1]))) == 0.0:
+        return coordinate, 'node_order_fallback'
+
+    try:
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return coordinate, 'node_order_fallback'
+    axis = np.asarray(vh[0], dtype=np.float64)
+    if not np.all(np.isfinite(axis)) or float(np.linalg.norm(axis)) == 0.0:
+        return coordinate, 'node_order_fallback'
+    axis = axis / float(np.linalg.norm(axis))
+    if abs(float(axis[0])) >= abs(float(axis[1])):
+        if axis[0] < 0.0:
+            axis = -axis
+    elif axis[1] < 0.0:
+        axis = -axis
+
+    projected = (xy[:, 0] - float(origin[0])) * axis[0] + (
+        xy[:, 1] - float(origin[1])
+    ) * axis[1]
+    finite_indices = np.flatnonzero(finite)
+    finite_order = finite_indices[
+        np.lexsort((node_id[finite_indices], np.round(projected, decimals=9)))
+    ]
+    step_m = np.hypot(np.diff(x_m[finite_order]), np.diff(y_m[finite_order]))
+    coordinate[finite_order] = np.concatenate(
+        (
+            np.asarray([0.0], dtype=np.float64),
+            np.cumsum(step_m, dtype=np.float64),
+        )
+    )
+    return np.ascontiguousarray(coordinate, dtype=np.float64), 'line_2d_path_distance'
+
+
+def _floating_datum_smoothing_order(
+    *,
+    node_id: np.ndarray,
+    smoothing_coordinate_m: np.ndarray,
+    coordinate_mode: Literal['line_2d_path_distance', 'node_order_fallback'],
+) -> np.ndarray:
+    if coordinate_mode == 'node_order_fallback':
+        return np.ascontiguousarray(np.argsort(node_id, kind='stable'), dtype=np.int64)
+    finite_rank = np.where(np.isfinite(smoothing_coordinate_m), 0, 1)
+    coordinate_sort = np.where(np.isfinite(smoothing_coordinate_m), smoothing_coordinate_m, 0.0)
+    order = np.lexsort((node_id, coordinate_sort, finite_rank))
+    return np.ascontiguousarray(order, dtype=np.int64)
+
+
+def _smooth_by_ordered_window(
+    *,
+    elevation_m: np.ndarray,
+    order: np.ndarray,
+    window_nodes: int,
+    method: Literal['moving_average', 'median'],
+) -> np.ndarray:
+    smoothed_ordered = smooth_refraction_floating_datum_elevation(
+        elevation_m[order],
+        window_nodes=window_nodes,
+        method=method,
+    )
+    out = np.empty_like(smoothed_ordered)
+    out[order] = smoothed_ordered
+    return np.ascontiguousarray(out, dtype=np.float64)
+
+
+def _smooth_by_radius_with_window_fallback(
+    *,
+    elevation_m: np.ndarray,
+    smoothing_coordinate_m: np.ndarray,
+    window_smoothed_elevation_m: np.ndarray,
+    radius_m: float,
+    method: Literal['moving_average', 'median'],
+) -> tuple[np.ndarray, np.ndarray, int]:
+    out = np.asarray(window_smoothed_elevation_m, dtype=np.float64).copy()
+    radius_sample_count = np.zeros(elevation_m.shape, dtype=np.int64)
+    finite_coordinate = np.isfinite(smoothing_coordinate_m)
+    finite_elevation = np.isfinite(elevation_m)
+    n_window_fallback = 0
+    for index in range(int(elevation_m.shape[0])):
+        if not finite_coordinate[index]:
+            n_window_fallback += 1
+            continue
+        sample_mask = (
+            finite_coordinate
+            & finite_elevation
+            & (np.abs(smoothing_coordinate_m - float(smoothing_coordinate_m[index])) <= radius_m)
+        )
+        sample = elevation_m[sample_mask]
+        radius_sample_count[index] = int(sample.shape[0])
+        if sample.size == 0:
+            n_window_fallback += 1
+            continue
+        if method == 'moving_average':
+            out[index] = float(np.mean(sample))
+        else:
+            out[index] = float(np.median(sample))
+    return (
+        np.ascontiguousarray(out, dtype=np.float64),
+        np.ascontiguousarray(radius_sample_count, dtype=np.int64),
+        int(n_window_fallback),
+    )
+
+
+def _project_smoothed_datum_to_endpoint(
+    *,
+    endpoint_node_id: np.ndarray,
+    node_id: np.ndarray,
+    smoothed_elevation_m: np.ndarray,
+    endpoint_name: str,
+) -> np.ndarray:
+    lookup = {
+        int(raw_node_id): float(value)
+        for raw_node_id, value in zip(node_id, smoothed_elevation_m, strict=True)
+    }
+    out = np.empty(endpoint_node_id.shape, dtype=np.float64)
+    for index, raw_node_id in enumerate(endpoint_node_id.tolist()):
+        key = int(raw_node_id)
+        if key not in lookup:
+            raise RefractionDatumError(f'{endpoint_name} contains unknown node_id {key}')
+        out[index] = lookup[key]
+    return np.ascontiguousarray(out, dtype=np.float64)
+
+
+def _smoothed_floating_datum_qc(
+    *,
+    coordinate_mode: str,
+    method: str,
+    window_nodes: int,
+    radius_m: float | None,
+    node_id: np.ndarray,
+    smoothing_coordinate_m: np.ndarray,
+    node_elevation_m: np.ndarray,
+    radius_sample_count: np.ndarray,
+    n_radius_window_fallback_nodes: int,
+    n_source_endpoints: int,
+    n_receiver_endpoints: int,
+) -> dict[str, Any]:
+    finite_coordinate = np.isfinite(smoothing_coordinate_m)
+    return {
+        'coordinate_mode': coordinate_mode,
+        'method': method,
+        'window_nodes': int(window_nodes),
+        'radius_m': None if radius_m is None else float(radius_m),
+        'radius_enabled': radius_m is not None,
+        'n_nodes': int(node_id.shape[0]),
+        'n_finite_smoothing_coordinate_nodes': int(np.count_nonzero(finite_coordinate)),
+        'n_nonfinite_smoothing_coordinate_nodes': int(
+            node_id.shape[0] - np.count_nonzero(finite_coordinate)
+        ),
+        'n_radius_window_fallback_nodes': int(n_radius_window_fallback_nodes),
+        'radius_sample_count_summary': _integer_summary(radius_sample_count),
+        'n_source_endpoints': int(n_source_endpoints),
+        'n_receiver_endpoints': int(n_receiver_endpoints),
+        'smoothing_coordinate_summary_m': _shift_summary(smoothing_coordinate_m),
+        'node_elevation_summary_m': _shift_summary(node_elevation_m),
+    }
+
+
 def _coerce_datum_elevation(
     value: np.ndarray | float,
     *,
@@ -941,6 +1238,18 @@ def _shift_summary(values: np.ndarray) -> dict[str, float | int | None]:
     }
 
 
+def _integer_summary(values: np.ndarray) -> dict[str, int | float | None]:
+    arr = np.asarray(values, dtype=np.int64)
+    if arr.size == 0:
+        return {'count': 0, 'min': None, 'median': None, 'max': None}
+    return {
+        'count': int(arr.shape[0]),
+        'min': int(np.min(arr)),
+        'median': float(np.median(arr)),
+        'max': int(np.max(arr)),
+    }
+
+
 def _status_counts(values: np.ndarray) -> dict[str, int]:
     out: dict[str, int] = {}
     for raw in np.asarray(values).tolist():
@@ -1062,10 +1371,12 @@ __all__ = [
     'RefractionDatumEndpointResult',
     'RefractionDatumError',
     'RefractionDatumStaticsResult',
+    'RefractionSmoothedFloatingDatum',
     'ResolvedFloatingDatum',
     'build_refraction_datum_statics',
     'build_refraction_endpoint_datum_statics',
     'compute_refraction_datum_elevation_shift_s',
     'compute_refraction_datum_elevation_shift_scalar_s',
+    'resolve_smoothed_refraction_floating_datum',
     'smooth_refraction_floating_datum_elevation',
 ]

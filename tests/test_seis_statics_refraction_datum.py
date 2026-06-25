@@ -12,6 +12,7 @@ from seis_statics.refraction.datum import (
     build_refraction_datum_statics,
     compute_refraction_datum_elevation_shift_s,
     compute_refraction_datum_elevation_shift_scalar_s,
+    resolve_smoothed_refraction_floating_datum,
     smooth_refraction_floating_datum_elevation,
 )
 from seis_statics.refraction.field_composition import (
@@ -314,6 +315,197 @@ def test_refraction_floating_datum_smoothing_is_array_only() -> None:
 
     with pytest.raises(RefractionDatumError, match='window_nodes'):
         smooth_refraction_floating_datum_elevation(_values([1.0, 2.0]), window_nodes=2)
+
+
+def test_smoothed_refraction_floating_datum_uses_line_coordinate_and_projects_endpoints() -> None:
+    result = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([30, 10, 20]),
+        node_x_m=_values([20.0, 0.0, 10.0]),
+        node_y_m=_values([0.0, 0.0, 0.0]),
+        node_surface_elevation_m=_values([120.0, 100.0, 110.0]),
+        source_node_id=_ids([10, 30]),
+        receiver_node_id=_ids([20]),
+        window_nodes=3,
+    )
+
+    np.testing.assert_allclose(result.node_elevation_m, [115.0, 105.0, 110.0])
+    np.testing.assert_allclose(result.source_elevation_m, [105.0, 115.0])
+    np.testing.assert_allclose(result.receiver_elevation_m, [110.0])
+    np.testing.assert_array_equal(result.smoothing_order, [1, 2, 0])
+    assert result.qc['coordinate_mode'] == 'line_2d_path_distance'
+
+
+def test_smoothed_refraction_floating_datum_handles_rotated_and_constant_x_lines() -> None:
+    rotated = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([3, 1, 2]),
+        node_x_m=_values([2.0, 0.0, 1.0]),
+        node_y_m=_values([2.0, 0.0, 1.0]),
+        node_surface_elevation_m=_values([30.0, 10.0, 20.0]),
+        source_node_id=_ids([1, 2, 3]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+    )
+    vertical = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([3, 1, 2]),
+        node_x_m=_values([5.0, 5.0, 5.0]),
+        node_y_m=_values([2.0, 0.0, 1.0]),
+        node_surface_elevation_m=_values([30.0, 10.0, 20.0]),
+        source_node_id=_ids([1, 2, 3]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+    )
+
+    np.testing.assert_array_equal(rotated.smoothing_order, [1, 2, 0])
+    np.testing.assert_array_equal(vertical.smoothing_order, [1, 2, 0])
+    np.testing.assert_allclose(rotated.source_elevation_m, [15.0, 20.0, 25.0])
+    np.testing.assert_allclose(vertical.source_elevation_m, [15.0, 20.0, 25.0])
+
+
+def test_smoothed_refraction_floating_datum_partially_missing_xy_falls_back_in_order() -> None:
+    result = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([1, 2, 3, 4]),
+        node_x_m=_values([0.0, np.nan, 2.0, 1.0]),
+        node_y_m=_values([0.0, np.nan, 0.0, 0.0]),
+        node_surface_elevation_m=_values([10.0, 20.0, 30.0, 40.0]),
+        source_node_id=_ids([1, 2, 3, 4]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+    )
+
+    np.testing.assert_array_equal(result.smoothing_order, [0, 3, 2, 1])
+    np.testing.assert_allclose(result.source_elevation_m, [25.0, 25.0, 30.0, 80.0 / 3.0])
+    assert result.qc['n_nonfinite_smoothing_coordinate_nodes'] == 1
+
+
+def test_smoothed_refraction_floating_datum_radius_and_window_fallback() -> None:
+    radius = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([1, 2, 3]),
+        node_x_m=_values([0.0, 1.0, 5.0]),
+        node_y_m=_values([0.0, 0.0, 0.0]),
+        node_surface_elevation_m=_values([10.0, 20.0, 100.0]),
+        source_node_id=_ids([1, 2, 3]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+        radius_m=1.1,
+    )
+    fallback = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([1, 2, 3]),
+        node_x_m=_values([0.0, 10.0, 20.0]),
+        node_y_m=_values([0.0, 0.0, 0.0]),
+        node_surface_elevation_m=_values([np.nan, 20.0, 30.0]),
+        source_node_id=_ids([1, 2, 3]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+        radius_m=1.0,
+    )
+
+    np.testing.assert_allclose(radius.source_elevation_m, [15.0, 15.0, 100.0])
+    np.testing.assert_allclose(fallback.source_elevation_m, [20.0, 20.0, 30.0])
+    assert fallback.qc['n_radius_window_fallback_nodes'] == 1
+
+    even_summary = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([1, 2, 3, 4]),
+        node_x_m=_values([0.0, 1.0, 2.0, 3.0]),
+        node_y_m=_values([0.0, 0.0, 0.0, 0.0]),
+        node_surface_elevation_m=_values([10.0, 20.0, 30.0, 40.0]),
+        source_node_id=_ids([]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+        radius_m=1.1,
+    )
+    assert even_summary.qc['radius_sample_count_summary']['median'] == pytest.approx(2.5)
+
+
+def test_smoothed_refraction_floating_datum_radius_uses_path_distance() -> None:
+    result = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([1, 2, 3]),
+        node_x_m=_values([1.0, np.sqrt(0.5), 0.0]),
+        node_y_m=_values([0.0, np.sqrt(0.5), 1.0]),
+        node_surface_elevation_m=_values([0.0, 100.0, 200.0]),
+        source_node_id=_ids([1, 2, 3]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+        radius_m=1.45,
+    )
+
+    np.testing.assert_array_equal(result.smoothing_order, [0, 1, 2])
+    np.testing.assert_allclose(
+        result.smoothing_coordinate_m,
+        [0.0, np.sqrt(2.0 - np.sqrt(2.0)), 2.0 * np.sqrt(2.0 - np.sqrt(2.0))],
+    )
+    np.testing.assert_allclose(result.source_elevation_m, [50.0, 100.0, 150.0])
+    assert result.qc['radius_sample_count_summary']['min'] == 2
+
+
+def test_smoothed_refraction_floating_datum_supports_median_and_nan_outputs() -> None:
+    median = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([1, 2, 3]),
+        node_x_m=_values([0.0, 1.0, 2.0]),
+        node_y_m=_values([0.0, 0.0, 0.0]),
+        node_surface_elevation_m=_values([0.0, 100.0, 2.0]),
+        source_node_id=_ids([1, 2, 3]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+        method='median',
+    )
+    all_nan = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([1, 2]),
+        node_x_m=_values([0.0, 1.0]),
+        node_y_m=_values([0.0, 0.0]),
+        node_surface_elevation_m=_values([np.nan, np.nan]),
+        source_node_id=_ids([1, 2]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+    )
+
+    np.testing.assert_allclose(median.source_elevation_m, [50.0, 2.0, 51.0])
+    assert np.all(np.isnan(all_nan.source_elevation_m))
+
+
+def test_smoothed_refraction_floating_datum_rejects_invalid_inputs() -> None:
+    kwargs = {
+        'node_id': _ids([1, 2]),
+        'node_x_m': _values([0.0, 1.0]),
+        'node_y_m': _values([0.0, 0.0]),
+        'node_surface_elevation_m': _values([10.0, 20.0]),
+        'source_node_id': _ids([1]),
+        'receiver_node_id': _ids([]),
+        'window_nodes': 3,
+    }
+
+    with pytest.raises(RefractionDatumError, match='window_nodes'):
+        resolve_smoothed_refraction_floating_datum(**{**kwargs, 'window_nodes': 2})
+    with pytest.raises(RefractionDatumError, match='radius_m'):
+        resolve_smoothed_refraction_floating_datum(**kwargs, radius_m=-1.0)
+    with pytest.raises(RefractionDatumError, match='unique'):
+        resolve_smoothed_refraction_floating_datum(**{**kwargs, 'node_id': _ids([1, 1])})
+    with pytest.raises(RefractionDatumError, match='unknown node_id 9'):
+        resolve_smoothed_refraction_floating_datum(
+            **{**kwargs, 'source_node_id': _ids([9])}
+        )
+
+
+def test_smoothed_refraction_floating_datum_is_deterministic_by_node_values() -> None:
+    first = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([3, 1, 2]),
+        node_x_m=_values([2.0, 0.0, 1.0]),
+        node_y_m=_values([0.0, 0.0, 0.0]),
+        node_surface_elevation_m=_values([30.0, 10.0, 20.0]),
+        source_node_id=_ids([1, 2, 3]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+    )
+    second = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([2, 3, 1]),
+        node_x_m=_values([1.0, 2.0, 0.0]),
+        node_y_m=_values([0.0, 0.0, 0.0]),
+        node_surface_elevation_m=_values([20.0, 30.0, 10.0]),
+        source_node_id=_ids([1, 2, 3]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+    )
+
+    np.testing.assert_allclose(first.source_elevation_m, second.source_elevation_m)
 
 
 def test_refraction_datum_module_has_no_artifact_or_file_io_imports() -> None:

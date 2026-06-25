@@ -236,6 +236,99 @@ def test_refraction_solver_fixed_global_exact_fit_is_scale_stable(
     assert result.qc['solver_quality']['solve_scale'] > 0.0
 
 
+def test_refraction_solver_fixed_global_sparse_consumer_equivalent_quality_regression() -> None:
+    fixed_velocity = 2600.0
+    n_sources = 48
+    n_receivers = 48
+    source_ids = np.arange(1000, 1000 + n_sources, dtype=np.int64)
+    receiver_ids = np.arange(2000, 2000 + n_receivers, dtype=np.int64)
+    source_x = np.linspace(0.0, 4700.0, n_sources, dtype=np.float64)
+    receiver_x = np.linspace(120.0, 4820.0, n_receivers, dtype=np.float64)
+    source_grid, receiver_grid = np.meshgrid(
+        np.arange(n_sources, dtype=np.int64),
+        np.arange(n_receivers, dtype=np.int64),
+        indexing='ij',
+    )
+    source_index = source_grid.ravel()
+    receiver_index = receiver_grid.ravel()
+    source_node_id = source_ids[source_index]
+    receiver_node_id = receiver_ids[receiver_index]
+    distance_m = (
+        np.abs(receiver_x[receiver_index] - source_x[source_index]) + 350.0
+    )
+    source_t1 = 0.018 + 0.0003 * (np.arange(n_sources, dtype=np.float64) % 7.0)
+    receiver_t1 = 0.022 + 0.00025 * (
+        np.arange(n_receivers, dtype=np.float64) % 11.0
+    )
+    pick_time = (
+        source_t1[source_index]
+        + receiver_t1[receiver_index]
+        + distance_m / fixed_velocity
+    )
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(pick_time.shape, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.concatenate([source_ids, receiver_ids]),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=fixed_velocity,
+        min_observations_per_node=1,
+        n_traces=int(pick_time.size),
+    )
+
+    result = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(min_picks_per_node=1),
+    )
+    repeat = solve_refraction_static_design_least_squares(
+        design,
+        model=_model(mode='fixed_global', fixed_velocity=fixed_velocity),
+        solver_options=_solver_options(min_picks_per_node=1),
+    )
+
+    quality = result.qc['solver_quality']
+    repeat_quality = repeat.qc['solver_quality']
+    matrix_shape = tuple(int(value) for value in quality['matrix_shape'])
+    scipy_default_lsmr_maxiter = min(matrix_shape)
+    assert result.solver_success
+    assert quality['verified'] is True
+    assert quality['stage'] in {'first_attempt', 'retry_strict_lsmr'}
+    expected_lsmr_tol = (
+        solver_module._LSQ_FIRST_LSMR_TOL
+        if quality['stage'] == 'first_attempt'
+        else solver_module._LSQ_RETRY_LSMR_TOL
+    )
+    assert quality['lsmr_tol'] == pytest.approx(expected_lsmr_tol)
+    assert quality['lsmr_maxiter'] == solver_module._lsq_lsmr_maxiter(
+        result.system,
+        stage=str(quality['stage']),
+    )
+    assert int(quality['lsmr_maxiter']) > scipy_default_lsmr_maxiter
+    assert matrix_shape == result.system.augmented_matrix.shape
+    assert matrix_shape[0] * matrix_shape[1] > solver_module._LSQ_DENSE_RETRY_MAX_ELEMENTS
+    assert quality['projected_gradient_ratio'] < 1.0
+    assert quality['matrix_nnz'] == result.system.augmented_matrix.nnz
+    assert np.all(np.diff(result.system.augmented_matrix.indptr) > 0)
+    np.testing.assert_allclose(result.row_residual_s, 0.0, atol=1.0e-10)
+    np.testing.assert_array_equal(
+        result.used_observation_mask_sorted,
+        np.ones(pick_time.shape, dtype=bool),
+    )
+    assert repeat.solver_success
+    assert repeat_quality['verified'] is True
+    assert repeat_quality['stage'] == quality['stage']
+    assert repeat.solver_status == result.solver_status
+    np.testing.assert_allclose(
+        repeat.node_half_intercept_time_s,
+        result.node_half_intercept_time_s,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(repeat.row_residual_s, result.row_residual_s, atol=1.0e-12)
+
+
 def test_refraction_solver_polished_solver_cost_is_unscaled_in_qc() -> None:
     fixed_velocity = 2500.0
     distance_m = np.asarray([500.0, 500.0], dtype=np.float64)
@@ -289,6 +382,209 @@ def test_refraction_lsq_solution_is_invariant_to_common_system_scale() -> None:
             base_result.active_mask,
         )
         assert result.refraction_solver_quality['verified'] is True
+
+
+def test_refraction_lsq_sparse_attempts_forward_distinct_lsmr_maxiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system = _simple_lsq_system(
+        np.eye(1, dtype=np.float64),
+        np.asarray([1.0], dtype=np.float64),
+        lower=np.zeros(1, dtype=np.float64),
+        upper=np.ones(1, dtype=np.float64),
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_lsq_linear(*args: object, **kwargs: object) -> optimize.OptimizeResult:
+        del args
+        calls.append(dict(kwargs))
+        x = np.asarray([0.0 if len(calls) == 1 else 1.0], dtype=np.float64)
+        return optimize.OptimizeResult(
+            x=x,
+            success=True,
+            status=1,
+            message='forced',
+            cost=0.0,
+            optimality=0.0,
+            nit=len(calls),
+            unbounded_sol=(x.copy(), 1, len(calls) * 10, 0.1, 0.01, 1.0, 2.0, 3.0),
+        )
+
+    monkeypatch.setattr(solver_module.optimize, 'lsq_linear', fake_lsq_linear)
+
+    result = solver_module._run_lsq_linear(system)
+
+    assert len(calls) == 2
+    assert calls[0]['lsq_solver'] == 'lsmr'
+    assert calls[1]['lsq_solver'] == 'lsmr'
+    assert calls[0]['lsmr_tol'] == solver_module._LSQ_FIRST_LSMR_TOL
+    assert calls[1]['lsmr_tol'] == solver_module._LSQ_RETRY_LSMR_TOL
+    assert calls[0]['lsmr_maxiter'] == solver_module._lsq_lsmr_maxiter(
+        system,
+        stage='first_attempt',
+    )
+    assert calls[1]['lsmr_maxiter'] == solver_module._lsq_lsmr_maxiter(
+        system,
+        stage='retry_strict_lsmr',
+    )
+    assert int(calls[0]['lsmr_maxiter']) < int(calls[1]['lsmr_maxiter'])
+    assert result.refraction_solver_quality['stage'] == 'retry_strict_lsmr'
+    assert result.refraction_solver_quality['verified'] is True
+    assert result.refraction_solver_quality['lsmr_maxiter'] == calls[1]['lsmr_maxiter']
+    assert result.refraction_solver_quality['lsmr_tol'] == calls[1]['lsmr_tol']
+    assert result.refraction_solver_quality['lsmr_iterations'] == 20
+
+
+def test_refraction_lsq_strict_retry_recovers_real_sparse_lsmr_budget_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(solver_module, '_LSQ_FIRST_LSMR_MAXITER_MIN', 1)
+    monkeypatch.setattr(solver_module, '_LSQ_FIRST_LSMR_MAXITER_FACTOR', 0)
+    system = _simple_lsq_system(
+        np.asarray([[1.0, 0.1], [0.0, 1.0]], dtype=np.float64),
+        np.asarray([0.19, 0.9], dtype=np.float64),
+        lower=np.zeros(2, dtype=np.float64),
+        upper=np.ones(2, dtype=np.float64),
+    )
+    first_lsmr_maxiter = solver_module._lsq_lsmr_maxiter(
+        system,
+        stage='first_attempt',
+    )
+    retry_lsmr_maxiter = solver_module._lsq_lsmr_maxiter(
+        system,
+        stage='retry_strict_lsmr',
+    )
+    scale = solver_module._common_lsq_solve_scale(
+        system.augmented_matrix,
+        system.augmented_rhs_s,
+    )
+    first = solver_module._run_scaled_lsq_linear_attempt(
+        system,
+        solve_scale=scale,
+        stage='first_attempt',
+        tol=solver_module._LSQ_FIRST_TOL,
+        lsmr_tol=solver_module._LSQ_FIRST_LSMR_TOL,
+        max_iter=max(100, 20 * int(system.n_parameters)),
+        lsmr_maxiter=first_lsmr_maxiter,
+        dense=False,
+    )
+    _, first_quality = solver_module._verify_lsq_linear_solution(
+        system,
+        first.x,
+        solve_scale=scale,
+        stage='first_attempt',
+        scipy_result=first,
+    )
+
+    result = solver_module._run_lsq_linear(system)
+
+    assert first_lsmr_maxiter == 1
+    assert retry_lsmr_maxiter > first_lsmr_maxiter
+    assert first_quality.verified is False
+    assert first_quality.projected_gradient_ratio > 1.0
+    assert result.refraction_solver_quality['stage'] == 'retry_strict_lsmr'
+    assert result.refraction_solver_quality['verified'] is True
+    assert result.refraction_solver_quality['lsmr_maxiter'] == retry_lsmr_maxiter
+    np.testing.assert_allclose(result.x, [0.1, 0.9], atol=1.0e-12)
+
+
+def test_refraction_lsq_dense_attempt_does_not_forward_lsmr_maxiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system = _simple_lsq_system(
+        np.eye(1, dtype=np.float64),
+        np.asarray([1.0], dtype=np.float64),
+        lower=np.zeros(1, dtype=np.float64),
+        upper=np.ones(1, dtype=np.float64),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_lsq_linear(*args: object, **kwargs: object) -> optimize.OptimizeResult:
+        del args
+        captured.update(kwargs)
+        return optimize.OptimizeResult(
+            x=np.ones(1, dtype=np.float64),
+            success=True,
+            status=1,
+            message='forced',
+            cost=0.0,
+            optimality=0.0,
+            nit=1,
+        )
+
+    monkeypatch.setattr(solver_module.optimize, 'lsq_linear', fake_lsq_linear)
+
+    result = solver_module._run_scaled_lsq_linear_attempt(
+        system,
+        solve_scale=1.0,
+        stage='dense_bvls_retry',
+        tol=solver_module._LSQ_RETRY_TOL,
+        lsmr_tol=solver_module._LSQ_RETRY_LSMR_TOL,
+        max_iter=10,
+        lsmr_maxiter=2000,
+        dense=True,
+    )
+
+    assert captured['method'] == 'bvls'
+    assert captured['lsq_solver'] is None
+    assert captured['lsmr_tol'] is None
+    assert captured['lsmr_maxiter'] is None
+    assert result.refraction_solver_lsmr_tol is None
+    assert result.refraction_solver_lsmr_maxiter is None
+
+
+def test_refraction_lsq_quality_diagnostics_include_lsmr_and_kkt_ratio() -> None:
+    system = _simple_lsq_system(
+        np.eye(1, dtype=np.float64),
+        np.asarray([1.0], dtype=np.float64),
+        lower=np.zeros(1, dtype=np.float64),
+        upper=np.ones(1, dtype=np.float64),
+    )
+    fake = optimize.OptimizeResult(
+        x=np.zeros(1, dtype=np.float64),
+        success=True,
+        status=1,
+        optimality=0.0,
+        nit=3,
+        unbounded_sol=(
+            np.zeros(1, dtype=np.float64),
+            7,
+            123,
+            1.0e-3,
+            1.0e-4,
+            2.0,
+            30.0,
+            4.0,
+        ),
+    )
+    fake.refraction_solver_lsmr_tol = 1.0e-14
+    fake.refraction_solver_lsmr_maxiter = 2000
+
+    _, quality = solver_module._verify_lsq_linear_solution(
+        system,
+        np.zeros(1, dtype=np.float64),
+        solve_scale=1.0,
+        stage='retry_strict_lsmr',
+        scipy_result=fake,
+    )
+    payload = solver_module._lsq_quality_json(quality)
+
+    assert payload['verified'] is False
+    assert payload['stage'] == 'retry_strict_lsmr'
+    assert payload['matrix_shape'] == [1, 1]
+    assert payload['matrix_nnz'] == 1
+    assert payload['outer_iterations'] == 3
+    assert payload['outer_status'] == 1
+    assert payload['outer_success'] is True
+    assert payload['projected_gradient_inf_norm'] == pytest.approx(1.0)
+    assert payload['kkt_tolerance'] is not None
+    assert payload['projected_gradient_ratio'] is not None
+    assert float(payload['projected_gradient_ratio']) > 1.0
+    assert payload['lsmr_tol'] == pytest.approx(1.0e-14)
+    assert payload['lsmr_maxiter'] == 2000
+    assert payload['lsmr_stop_code'] == 7
+    assert payload['lsmr_iterations'] == 123
+    assert payload['lsmr_condition_estimate'] == pytest.approx(30.0)
 
 
 def test_refraction_solver_public_result_is_invariant_to_common_system_scale(
@@ -542,14 +838,26 @@ def test_refraction_lsq_rejects_polished_result_with_worse_objective(
             stage='active_set_polish',
             failure_reason='',
             solve_scale=float(solve_scale),
+            matrix_shape=(1, 1),
+            matrix_nnz=1,
             scipy_success=True,
             scipy_status=1,
             scipy_optimality=0.0,
             scipy_iterations=1,
+            lsmr_tol=None,
+            lsmr_maxiter=None,
+            lsmr_stop_code=None,
+            lsmr_iterations=None,
+            lsmr_norm_r=None,
+            lsmr_norm_ar=None,
+            lsmr_norm_a=None,
+            lsmr_condition_estimate=None,
+            lsmr_norm_x=None,
             unscaled_augmented_residual_norm=1.0e-7,
             unscaled_objective=1.0e-14,
             projected_gradient_inf_norm=0.0,
             kkt_tolerance=1.0,
+            projected_gradient_ratio=0.0,
             max_bound_violation=0.0,
             bound_tolerance=0.0,
         )
