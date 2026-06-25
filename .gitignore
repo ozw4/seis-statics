@@ -50,3 +50,4 @@ debug_*/
 vendor/issue_forge
 vendor/issue_forge/
 .venv/
+dist/
