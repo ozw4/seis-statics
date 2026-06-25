@@ -76,7 +76,11 @@ RefractionLayerSolver = Callable[
 
 @dataclass(frozen=True)
 class RefractionMultilayerTimeTermLayerResult:
-    """Single enabled-layer solve and trace-order layer metadata."""
+    """Single enabled-layer solve and sorted-position layer metadata.
+
+    ``solve_result`` full trace arrays are also in sorted-position order. The
+    caller's original trace ID mapping remains on the public input model.
+    """
 
     layer_kind: RefractionLayerKind
     layer_index: int
@@ -89,7 +93,7 @@ class RefractionMultilayerTimeTermLayerResult:
 
 @dataclass(frozen=True)
 class RefractionMultilayerTimeTermSolveResult:
-    """Combined trace-order result for enabled refraction time-term layers."""
+    """Combined sorted-position result for enabled refraction time-term layers."""
 
     layer_results: tuple[RefractionMultilayerTimeTermLayerResult, ...]
     layer_result_by_kind: dict[str, RefractionMultilayerTimeTermLayerResult]
@@ -116,8 +120,9 @@ def solve_refraction_multilayer_time_terms(
     """Solve enabled ``v2_t1``, ``v3_t2``, and ``vsub_t3`` time-term layers.
 
     This function is intentionally package-local and pure: it consumes the
-    already-normalized trace-order input model and refraction option dataclasses,
-    then delegates each layer to the existing sparse time-term solver.
+    already-normalized sorted-position input model and refraction option
+    dataclasses, then delegates each layer to the existing sparse time-term
+    solver. Public ``*_sorted`` result arrays stay in sorted-position order.
     """
     _validate_inputs(input_model=input_model, model=model)
     layer_config = normalize_refraction_layer_config(model)
@@ -284,8 +289,11 @@ def _layer_input_model(
     layer_masks: RefractionLayerObservationMasks,
     layer: RefractionLayerConfigLayer,
 ) -> RefractionStaticInputModel:
+    """Build per-layer input whose full solver arrays scatter to sorted positions."""
+    n_traces = int(input_model.n_traces)
     return replace(
         input_model,
+        sorted_trace_index=np.arange(n_traces, dtype=np.int64),
         valid_observation_mask_sorted=layer_masks.layer_used_mask_sorted[layer.kind],
         rejection_reason_sorted=layer_masks.layer_rejection_reason_sorted[layer.kind],
         layer_observation_masks=None,
@@ -536,6 +544,7 @@ def _combine_layer_results(
     reason[used] = ''
     qc = {
         'method': 'multilayer_time_term',
+        'array_order': 'sorted_position',
         'layer_count': len(layer_results),
         'layer_kind': [result.layer_kind for result in layer_results],
         'layer_observations': refraction_layer_observation_qc(layer_masks),

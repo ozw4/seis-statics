@@ -48,10 +48,13 @@ VSUB_OFFSET_M = np.asarray(
     [2400.0, 2700.0, 3100.0, 2500.0, 3300.0, 2900.0, 2450.0, 2800.0, 3250.0, 3000.0],
     dtype=np.float64,
 )
+NONIDENTITY_SORTED_TRACE_INDEX_5 = np.asarray([3, 0, 4, 1, 2], dtype=np.int64)
 
 
 def test_multilayer_2layer_conversion_matches_t1lsst_endpoint_arrays() -> None:
-    input_model = _input_model(layer_count=2)
+    source_input_model = _input_model(layer_count=2)
+    sorted_trace_index = _nonidentity_sorted_trace_index(source_input_model.n_traces)
+    input_model = replace(source_input_model, sorted_trace_index=sorted_trace_index)
     solve = solve_refraction_multilayer_time_terms(
         input_model=input_model,
         model=_model(layer_count=2),
@@ -71,6 +74,7 @@ def test_multilayer_2layer_conversion_matches_t1lsst_endpoint_arrays() -> None:
         v3_m_s=V3_M_S,
     )
 
+    np.testing.assert_array_equal(input_model.sorted_trace_index, sorted_trace_index)
     assert result.layer_count == 2
     np.testing.assert_array_equal(result.source_endpoint.static_status, ['ok'] * 4)
     np.testing.assert_allclose(result.source_endpoint.sh1_m, expected.sh1_m[:4])
@@ -700,6 +704,14 @@ def _reorder_input_model(
         source_endpoint_id_sorted=take(input_model.source_endpoint_id_sorted),
         receiver_endpoint_id_sorted=take(input_model.receiver_endpoint_id_sorted),
     )
+
+
+def _nonidentity_sorted_trace_index(n_traces: int) -> np.ndarray:
+    trace_index = np.arange(n_traces, dtype=np.int64)
+    trace_index[: NONIDENTITY_SORTED_TRACE_INDEX_5.size] = (
+        NONIDENTITY_SORTED_TRACE_INDEX_5
+    )
+    return trace_index
 
 
 def _values_by_node(node_id: np.ndarray, values: np.ndarray) -> np.ndarray:

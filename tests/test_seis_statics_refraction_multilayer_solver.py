@@ -69,6 +69,123 @@ REFERENCE_VSUB_OFFSET_M = np.asarray(
     ],
     dtype=np.float64,
 )
+NONIDENTITY_SORTED_TRACE_INDEX_5 = np.asarray([3, 0, 4, 1, 2], dtype=np.int64)
+
+
+def test_multilayer_solver_keeps_layer_results_in_sorted_position_order() -> None:
+    input_model = _five_trace_input_model()
+    original_sorted_trace_index = input_model.sorted_trace_index.copy()
+    model = _three_layer_model(
+        RefractionStaticLayerOptions(
+            kind='v2_t1',
+            min_offset_m=0.0,
+            max_offset_m=100.0,
+            velocity_mode='fixed_global',
+            fixed_velocity_m_s=2500.0,
+        ),
+        RefractionStaticLayerOptions(
+            kind='v3_t2',
+            min_offset_m=100.0,
+            max_offset_m=200.0,
+            velocity_mode='fixed_global',
+            fixed_velocity_m_s=3500.0,
+        ),
+        RefractionStaticLayerOptions(
+            kind='vsub_t3',
+            min_offset_m=200.0,
+            max_offset_m=None,
+            velocity_mode='fixed_global',
+            fixed_velocity_m_s=5000.0,
+        ),
+    )
+
+    result = solve_refraction_multilayer_time_terms(
+        input_model=input_model,
+        model=model,
+        solver_options=_solver_options(),
+    )
+
+    np.testing.assert_array_equal(
+        input_model.sorted_trace_index,
+        original_sorted_trace_index,
+    )
+    assert result.qc['array_order'] == 'sorted_position'
+    np.testing.assert_array_equal(result.used_observation_mask_sorted, [True] * 5)
+    np.testing.assert_array_equal(result.rejected_observation_mask_sorted, [False] * 5)
+    np.testing.assert_array_equal(
+        result.layer_kind_sorted,
+        ['v2_t1', 'v3_t2', 'vsub_t3', 'v2_t1', 'v3_t2'],
+    )
+    np.testing.assert_allclose(result.residual_s_sorted, 0.0, atol=1.0e-10)
+    np.testing.assert_array_equal(
+        result.layer_result_by_kind['v2_t1'].solve_result.used_observation_mask_sorted,
+        [True, False, False, True, False],
+    )
+    np.testing.assert_array_equal(
+        result.layer_result_by_kind['v2_t1'].solve_result.design.row_trace_index_sorted,
+        [0, 3],
+    )
+    np.testing.assert_array_equal(
+        result.layer_result_by_kind['v3_t2'].solve_result.used_observation_mask_sorted,
+        [False, True, False, False, True],
+    )
+    np.testing.assert_array_equal(
+        result.layer_result_by_kind['v3_t2'].solve_result.design.row_trace_index_sorted,
+        [1, 4],
+    )
+    np.testing.assert_array_equal(
+        result.layer_result_by_kind['vsub_t3'].solve_result.used_observation_mask_sorted,
+        [False, False, True, False, False],
+    )
+    np.testing.assert_array_equal(
+        result.layer_result_by_kind[
+            'vsub_t3'
+        ].solve_result.design.row_trace_index_sorted,
+        [2],
+    )
+
+
+def test_multilayer_solver_velocity_order_rejection_uses_sorted_positions() -> None:
+    input_model = _five_trace_input_model()
+    model = _three_layer_model(
+        RefractionStaticLayerOptions(
+            kind='v2_t1',
+            min_offset_m=0.0,
+            max_offset_m=100.0,
+            velocity_mode='fixed_global',
+            fixed_velocity_m_s=2500.0,
+        ),
+        RefractionStaticLayerOptions(
+            kind='v3_t2',
+            min_offset_m=100.0,
+            max_offset_m=None,
+            velocity_mode='fixed_global',
+            fixed_velocity_m_s=2400.0,
+        ),
+    )
+
+    result = solve_refraction_multilayer_time_terms(
+        input_model=input_model,
+        model=model,
+        solver_options=_solver_options(),
+    )
+
+    np.testing.assert_array_equal(
+        result.used_observation_mask_sorted,
+        [True, False, False, True, False],
+    )
+    np.testing.assert_array_equal(
+        result.rejected_observation_mask_sorted,
+        [False, True, True, False, True],
+    )
+    np.testing.assert_array_equal(
+        result.layer_kind_sorted,
+        ['v2_t1', 'v3_t2', 'v3_t2', 'v2_t1', 'v3_t2'],
+    )
+    np.testing.assert_array_equal(
+        result.rejection_reason_sorted,
+        ['', 'invalid_velocity_order', 'invalid_velocity_order', '', 'invalid_velocity_order'],
+    )
 
 
 def test_multilayer_solver_combines_enabled_layer_trace_arrays() -> None:
@@ -189,6 +306,7 @@ def test_multilayer_solver_marks_invalid_deeper_velocity_order_rows() -> None:
 
 def test_multilayer_solver_preserves_layer_and_robust_rejection_reasons() -> None:
     input_model = _three_layer_input_model(layer_count=2)
+    sorted_trace_index = _nonidentity_sorted_trace_index(input_model.n_traces)
     pick_time = input_model.pick_time_s_sorted.copy()
     valid_mask = input_model.valid_observation_mask_sorted.copy()
     rejection_reason = input_model.rejection_reason_sorted.copy()
@@ -197,10 +315,12 @@ def test_multilayer_solver_preserves_layer_and_robust_rejection_reasons() -> Non
     pick_time[-1] += 0.12
     input_model = replace(
         input_model,
+        sorted_trace_index=sorted_trace_index,
         pick_time_s_sorted=pick_time,
         valid_observation_mask_sorted=valid_mask,
         rejection_reason_sorted=rejection_reason,
     )
+    original_sorted_trace_index = input_model.sorted_trace_index.copy()
     model = _three_layer_model(
         RefractionStaticLayerOptions(
             kind='v2_t1',
@@ -224,6 +344,10 @@ def test_multilayer_solver_preserves_layer_and_robust_rejection_reasons() -> Non
         solver_options=_robust_solver_options(),
     )
 
+    np.testing.assert_array_equal(
+        input_model.sorted_trace_index,
+        original_sorted_trace_index,
+    )
     assert result.rejection_reason_sorted[0] == 'bad_pick'
     assert result.rejection_reason_sorted[-1] == 'robust_rejected'
     assert result.layer_kind_sorted[0] == 'v2_t1'
@@ -361,7 +485,9 @@ def test_multilayer_solver_preserves_low_fold_cell_design_rejection_reasons() ->
 
 
 def test_multilayer_solver_projects_cell_velocity_to_deeper_layer_rows() -> None:
-    input_model = _cell_projection_input_model()
+    source_input_model = _cell_projection_input_model()
+    sorted_trace_index = _nonidentity_sorted_trace_index(source_input_model.n_traces)
+    input_model = replace(source_input_model, sorted_trace_index=sorted_trace_index)
     model = _three_layer_model(
         RefractionStaticLayerOptions(
             kind='v2_t1',
@@ -394,6 +520,7 @@ def test_multilayer_solver_projects_cell_velocity_to_deeper_layer_rows() -> None
         solver_options=_solver_options(),
     )
 
+    np.testing.assert_array_equal(input_model.sorted_trace_index, sorted_trace_index)
     v2 = result.layer_result_by_kind['v2_t1'].velocity_m_s_sorted
     assert np.all(np.isfinite(v2))
     assert np.all(v2[:8] < result.velocity_m_s_sorted[8:])
@@ -581,6 +708,46 @@ def _three_layer_input_model(layer_count: int = 3) -> RefractionStaticInputModel
                 pick = source_t[int(src)] + receiver_t[int(rec)] + distance / velocity
                 rows.append((int(src), int(rec), distance, pick))
     return _input_model_from_rows(rows)
+
+
+def _five_trace_input_model() -> RefractionStaticInputModel:
+    source_t = {10: 0.010, 11: 0.012, 12: 0.014}
+    receiver_t = {20: 0.020, 21: 0.022, 22: 0.024}
+    rows = [
+        _synthetic_row(source_t, receiver_t, 10, 20, 50.0, 2500.0),
+        _synthetic_row(source_t, receiver_t, 10, 21, 150.0, 3500.0),
+        _synthetic_row(source_t, receiver_t, 11, 21, 250.0, 5000.0),
+        _synthetic_row(source_t, receiver_t, 11, 22, 60.0, 2500.0),
+        _synthetic_row(source_t, receiver_t, 12, 22, 160.0, 3500.0),
+    ]
+    return replace(
+        _input_model_from_rows(rows),
+        sorted_trace_index=NONIDENTITY_SORTED_TRACE_INDEX_5.copy(),
+    )
+
+
+def _synthetic_row(
+    source_t: dict[int, float],
+    receiver_t: dict[int, float],
+    source_node: int,
+    receiver_node: int,
+    distance_m: float,
+    velocity_m_s: float,
+) -> tuple[int, int, float, float]:
+    return (
+        source_node,
+        receiver_node,
+        distance_m,
+        source_t[source_node] + receiver_t[receiver_node] + distance_m / velocity_m_s,
+    )
+
+
+def _nonidentity_sorted_trace_index(n_traces: int) -> np.ndarray:
+    trace_index = np.arange(n_traces, dtype=np.int64)
+    trace_index[: NONIDENTITY_SORTED_TRACE_INDEX_5.size] = (
+        NONIDENTITY_SORTED_TRACE_INDEX_5
+    )
+    return trace_index
 
 
 def _cell_projection_input_model() -> RefractionStaticInputModel:
