@@ -430,6 +430,59 @@ def test_refraction_lsq_sparse_attempts_forward_distinct_lsmr_maxiter(
     assert result.refraction_solver_quality['lsmr_iterations'] == 20
 
 
+def test_refraction_lsq_strict_retry_recovers_real_sparse_lsmr_budget_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(solver_module, '_LSQ_FIRST_LSMR_MAXITER_MIN', 1)
+    monkeypatch.setattr(solver_module, '_LSQ_FIRST_LSMR_MAXITER_FACTOR', 0)
+    system = _simple_lsq_system(
+        np.asarray([[1.0, 0.1], [0.0, 1.0]], dtype=np.float64),
+        np.asarray([0.19, 0.9], dtype=np.float64),
+        lower=np.zeros(2, dtype=np.float64),
+        upper=np.ones(2, dtype=np.float64),
+    )
+    first_lsmr_maxiter = solver_module._lsq_lsmr_maxiter(
+        system,
+        stage='first_attempt',
+    )
+    retry_lsmr_maxiter = solver_module._lsq_lsmr_maxiter(
+        system,
+        stage='retry_strict_lsmr',
+    )
+    scale = solver_module._common_lsq_solve_scale(
+        system.augmented_matrix,
+        system.augmented_rhs_s,
+    )
+    first = solver_module._run_scaled_lsq_linear_attempt(
+        system,
+        solve_scale=scale,
+        stage='first_attempt',
+        tol=solver_module._LSQ_FIRST_TOL,
+        lsmr_tol=solver_module._LSQ_FIRST_LSMR_TOL,
+        max_iter=max(100, 20 * int(system.n_parameters)),
+        lsmr_maxiter=first_lsmr_maxiter,
+        dense=False,
+    )
+    _, first_quality = solver_module._verify_lsq_linear_solution(
+        system,
+        first.x,
+        solve_scale=scale,
+        stage='first_attempt',
+        scipy_result=first,
+    )
+
+    result = solver_module._run_lsq_linear(system)
+
+    assert first_lsmr_maxiter == 1
+    assert retry_lsmr_maxiter > first_lsmr_maxiter
+    assert first_quality.verified is False
+    assert first_quality.projected_gradient_ratio > 1.0
+    assert result.refraction_solver_quality['stage'] == 'retry_strict_lsmr'
+    assert result.refraction_solver_quality['verified'] is True
+    assert result.refraction_solver_quality['lsmr_maxiter'] == retry_lsmr_maxiter
+    np.testing.assert_allclose(result.x, [0.1, 0.9], atol=1.0e-12)
+
+
 def test_refraction_lsq_dense_attempt_does_not_forward_lsmr_maxiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -403,6 +403,18 @@ def test_smoothed_refraction_floating_datum_radius_and_window_fallback() -> None
     np.testing.assert_allclose(fallback.source_elevation_m, [20.0, 20.0, 30.0])
     assert fallback.qc['n_radius_window_fallback_nodes'] == 1
 
+    even_summary = resolve_smoothed_refraction_floating_datum(
+        node_id=_ids([1, 2, 3, 4]),
+        node_x_m=_values([0.0, 1.0, 2.0, 3.0]),
+        node_y_m=_values([0.0, 0.0, 0.0, 0.0]),
+        node_surface_elevation_m=_values([10.0, 20.0, 30.0, 40.0]),
+        source_node_id=_ids([]),
+        receiver_node_id=_ids([]),
+        window_nodes=3,
+        radius_m=1.1,
+    )
+    assert even_summary.qc['radius_sample_count_summary']['median'] == pytest.approx(2.5)
+
 
 def test_smoothed_refraction_floating_datum_supports_median_and_nan_outputs() -> None:
     median = resolve_smoothed_refraction_floating_datum(

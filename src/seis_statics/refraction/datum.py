@@ -1226,14 +1226,14 @@ def _shift_summary(values: np.ndarray) -> dict[str, float | int | None]:
     }
 
 
-def _integer_summary(values: np.ndarray) -> dict[str, int | None]:
+def _integer_summary(values: np.ndarray) -> dict[str, int | float | None]:
     arr = np.asarray(values, dtype=np.int64)
     if arr.size == 0:
         return {'count': 0, 'min': None, 'median': None, 'max': None}
     return {
         'count': int(arr.shape[0]),
         'min': int(np.min(arr)),
-        'median': int(np.median(arr)),
+        'median': float(np.median(arr)),
         'max': int(np.max(arr)),
     }
 
