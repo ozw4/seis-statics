@@ -5,6 +5,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from scipy import optimize, sparse
+from scipy.sparse import linalg as sparse_linalg
 
 from seis_statics.refraction import (
     RefractionStaticModelOptions,
@@ -1182,7 +1183,22 @@ def _sparse_banded_rank_deficient_matrix(
     )
 
 
-def test_refraction_solver_large_sparse_exact_zero_is_not_full_rank() -> None:
+def test_refraction_solver_large_sparse_exact_zero_is_not_full_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_svds(*args: object, **kwargs: object) -> object:
+        raise AssertionError('structural-rank deficiency should not call svds')
+
+    def fail_normal(*args: object, **kwargs: object) -> object:
+        raise AssertionError('structural-rank deficiency should not call eigsh')
+
+    monkeypatch.setattr(solver_module, '_sparse_svds_singular_triplets', fail_svds)
+    monkeypatch.setattr(
+        solver_module,
+        '_sparse_normal_singular_triplets',
+        fail_normal,
+    )
+
     n = 1100
     diagnostic = solver_module._sparse_column_scaled_numerical_rank(
         sparse.diags(np.r_[np.ones(n - 1), 0.0], format='csr'),
@@ -1203,6 +1219,12 @@ def test_refraction_solver_large_sparse_full_rank_control_is_certified() -> None
     n = 1100
     small_control = _sparse_banded_rank_control_matrix(32)
     assert np.linalg.matrix_rank(small_control.toarray()) == 32
+    scaled_small_control = solver_module._column_l2_scaled_matrix(small_control)
+    scaled_singular_values = np.linalg.svd(
+        scaled_small_control.toarray(),
+        compute_uv=False,
+    )
+    assert np.min(np.diff(np.sort(scaled_singular_values))) > 1.0e-12
 
     diagnostic = solver_module._sparse_column_scaled_numerical_rank(
         _sparse_banded_rank_control_matrix(n),
@@ -1249,6 +1271,32 @@ def test_refraction_solver_large_sparse_allowed_nullity_boundary() -> None:
     assert two_null.estimated_rank == n - 2
     assert two_null.certification_status == 'rank_deficient'
     assert two_null.critical_singular_value <= two_null.threshold
+
+
+def test_refraction_solver_large_sparse_certification_is_deterministic() -> None:
+    diagnostics = tuple(
+        solver_module._sparse_column_scaled_numerical_rank(
+            _sparse_banded_rank_control_matrix(1100),
+            expected_rank=1100,
+            expected_nullity=0,
+            rtol=1.0e-10,
+        )
+        for _ in range(3)
+    )
+    fingerprints = tuple(
+        (
+            diagnostic.certification_status,
+            diagnostic.estimated_rank,
+            diagnostic.selected_candidate,
+            diagnostic.candidate_solver_names,
+            diagnostic.rejected_candidate_names,
+        )
+        for diagnostic in diagnostics
+    )
+
+    assert len(set(fingerprints)) == 1
+    assert diagnostics[0].certification_status == 'certified'
+    assert diagnostics[0].selected_candidate in {'propack_svds', 'eigsh_normal'}
 
 
 def test_refraction_solver_sparse_near_threshold_policy() -> None:
@@ -1480,6 +1528,93 @@ def test_refraction_solver_sparse_bad_corroborating_boundary_residual_is_rejecte
     assert diagnostic.certification_status == 'certified'
     assert diagnostic.selected_candidate == 'propack_svds'
     assert diagnostic.rejected_candidate_names == ('eigsh_normal',)
+
+
+def test_refraction_solver_sparse_valid_rank_deficient_candidate_is_not_certified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def svds_triplets(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        del scaled_matrix, name
+        return solver_module._SparseSingularTripletDiagnostic(
+            singular_values=np.zeros(int(k), dtype=np.float64),
+            max_residual=0.0,
+            residuals=np.zeros(int(k), dtype=np.float64),
+        )
+
+    def normal_triplets(
+        scaled_matrix: sparse.csr_matrix,
+        *,
+        k: int,
+        which: object,
+        name: str,
+    ) -> solver_module._SparseSingularTripletDiagnostic:
+        del scaled_matrix, name
+        singular_values = (
+            np.ones(int(k), dtype=np.float64)
+            if which == 'LA'
+            else np.zeros(int(k), dtype=np.float64)
+        )
+        return solver_module._SparseSingularTripletDiagnostic(
+            singular_values=singular_values,
+            max_residual=0.0,
+            residuals=np.zeros(int(k), dtype=np.float64),
+        )
+
+    monkeypatch.setattr(solver_module, '_sparse_svds_singular_triplets', svds_triplets)
+    monkeypatch.setattr(
+        solver_module,
+        '_sparse_normal_singular_triplets',
+        normal_triplets,
+    )
+
+    diagnostic = solver_module._sparse_column_scaled_numerical_rank(
+        _sparse_banded_rank_control_matrix(4),
+        expected_rank=4,
+        expected_nullity=0,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.certification_status == 'rank_deficient'
+    assert diagnostic.estimated_rank == 3
+    assert diagnostic.critical_singular_value == 0.0
+    assert diagnostic.failure_reason == 'critical singular value is not above threshold'
+    assert diagnostic.selected_candidate in {'propack_svds', 'eigsh_normal'}
+
+
+def test_refraction_solver_sparse_eigsh_uses_deterministic_initial_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_v0: list[np.ndarray] = []
+
+    def fake_eigsh(
+        operator: sparse_linalg.LinearOperator,
+        **kwargs: object,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        captured_v0.append(np.asarray(kwargs['v0'], dtype=np.float64))
+        return (
+            np.ones(1, dtype=np.float64),
+            np.eye(int(operator.shape[0]), 1, dtype=np.float64),
+        )
+
+    monkeypatch.setattr(solver_module.sparse_linalg, 'eigsh', fake_eigsh)
+
+    solver_module._sparse_normal_singular_triplets(
+        sparse.eye(3, format='csr', dtype=np.float64),
+        k=1,
+        which='SA',
+        name='test singular triplet',
+    )
+
+    assert len(captured_v0) == 1
+    np.testing.assert_allclose(
+        captured_v0[0],
+        solver_module._deterministic_nonzero_vector(3),
+    )
 
 
 def test_refraction_lsq_scale_accounts_for_large_matrix_with_nonzero_rhs() -> None:

@@ -44,6 +44,7 @@ from seis_statics.refraction.types import (
 
 
 _SVDS_SIGNATURE = signature(sparse_linalg.svds)
+_EIGSH_SIGNATURE = signature(sparse_linalg.eigsh)
 
 
 class RefractionStaticSolverError(ValueError):
@@ -1705,15 +1706,13 @@ def _sparse_normal_singular_triplets(
         rmatvec=matvec,
         dtype=np.float64,
     )
-    v0 = np.linspace(1.0, 2.0, operator_shape, dtype=np.float64)
     try:
-        eigenvalues, eigenvectors = sparse_linalg.eigsh(
+        eigenvalues, eigenvectors = _eigsh_with_deterministic_state(
             normal_operator,
             k=int(k),
             which=which,
             return_eigenvectors=True,
             tol=0.0,
-            v0=v0,
         )
     except Exception as exc:
         raise RefractionStaticSolverError(
@@ -1837,6 +1836,18 @@ def _svds_with_deterministic_state(
     if 'random_state' in signature.parameters:
         call_kwargs['random_state'] = 0
     result = sparse_linalg.svds(scaled_matrix, **call_kwargs)
+    return result
+
+
+def _eigsh_with_deterministic_state(
+    operator: sparse_linalg.LinearOperator,
+    **kwargs: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    signature = _EIGSH_SIGNATURE
+    call_kwargs = dict(kwargs)
+    if 'v0' in signature.parameters:
+        call_kwargs['v0'] = _deterministic_nonzero_vector(int(operator.shape[0]))
+    result = sparse_linalg.eigsh(operator, **call_kwargs)
     return result
 
 
