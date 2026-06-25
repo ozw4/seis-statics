@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PARITY_MANIFEST = REPO_ROOT / 'tests' / 'parity_manifest.md'
+RELEASE_VERSION = '0.4.1'
 
 EXPECTED_TIME_TERM_PUBLIC_API = (
     'MoveoutDistanceSource',
@@ -302,10 +303,25 @@ def test_refraction_public_api_is_pinned() -> None:
     _assert_public_api('seis_statics.refraction', EXPECTED_REFRACTION_PUBLIC_API)
 
 
-def test_distribution_version_is_release_handoff_minor() -> None:
+def test_distribution_version_is_release_patch() -> None:
     text = (REPO_ROOT / 'pyproject.toml').read_text(encoding='utf-8')
 
-    assert re.search(r'^version = "0\.4\.0"$', text, flags=re.MULTILINE)
+    assert re.search(
+        rf'^version = "{re.escape(RELEASE_VERSION)}"$',
+        text,
+        flags=re.MULTILINE,
+    )
+
+
+def test_v041_release_note_records_patch_contract() -> None:
+    text = (REPO_ROOT / 'docs' / 'releases' / 'v0.4.1.md').read_text(
+        encoding='utf-8'
+    )
+
+    assert '- public coordinate-aware floating datum smoothing API' in text
+    assert '- multi-layer sorted-position order correction' in text
+    assert '- low-level solver order contractは不変' in text
+    assert 'does not require a direct dependency on the `main` branch' in text
 
 
 def test_parity_manifest_records_migrated_test_mapping() -> None:
@@ -341,7 +357,7 @@ def test_wheel_install_smoke_without_application_dependencies(tmp_path: Path) ->
         capture_output=True,
         text=True,
     )
-    wheel = next(wheel_dir.glob('seis_statics-0.4.0-*.whl'))
+    wheel = next(wheel_dir.glob(f'seis_statics-{RELEASE_VERSION}-*.whl'))
 
     install_dir = tmp_path / 'install'
     subprocess.run(
@@ -385,8 +401,16 @@ from seis_statics.refraction import (
     RefractionStaticRobustOptions,
     RefractionStaticSolverOptions,
     build_refraction_static_design_matrix_from_arrays,
+    resolve_smoothed_refraction_floating_datum,
     solve_refraction_static_design_least_squares,
+    solve_refraction_multilayer_time_terms,
 )
+
+import importlib.metadata
+
+assert importlib.metadata.version('seis-statics') == '0.4.1'
+assert callable(resolve_smoothed_refraction_floating_datum)
+assert callable(solve_refraction_multilayer_time_terms)
 
 source_node_id = np.asarray([10, 10, 20, 20, 10, 20], dtype=np.int64)
 receiver_node_id = np.asarray([30, 40, 30, 40, 30, 40], dtype=np.int64)
