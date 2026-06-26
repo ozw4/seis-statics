@@ -939,6 +939,8 @@ def _floating_datum_smoothing_coordinate(
     finite_order = finite_indices[
         np.lexsort((node_id[finite_indices], np.round(projected, decimals=9)))
     ]
+    if node_id[finite_order[0]] > node_id[finite_order[-1]]:
+        finite_order = finite_order[::-1]
     step_m = np.hypot(np.diff(x_m[finite_order]), np.diff(y_m[finite_order]))
     coordinate[finite_order] = np.concatenate(
         (
