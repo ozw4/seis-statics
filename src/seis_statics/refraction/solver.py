@@ -89,6 +89,16 @@ class _NumericalRankDiagnostic:
 
 
 @dataclass(frozen=True)
+class _EndpointDistanceSpanDiagnostic:
+    representable: bool
+    n_components: int
+    n_rows: int
+    consistency_tolerance_m: float
+    conflicting_row_index: int | None
+    max_consistency_error_m: float
+
+
+@dataclass(frozen=True)
 class _SparseRankCandidate:
     solver_name: str
     critical_singular_value: float
@@ -380,6 +390,25 @@ def _build_refraction_static_solver_system_from_parts(
         raise RefractionStaticSolverError(
             'refraction solver system requires at least one observation row'
         )
+
+    if design.bedrock_velocity_mode == 'solve_global':
+        span = _distance_column_is_in_endpoint_node_span(
+            source_node_col=design.source_node_col[used_rows],
+            receiver_node_col=design.receiver_node_col[used_rows],
+            distance_m=design.row_distance_m[used_rows],
+            n_node_columns=design.n_active_nodes,
+            rtol=float(identifiability_rtol),
+        )
+        if span.representable:
+            raise RefractionStaticSolverError(
+                'solve_global physical system is not identifiable: '
+                'reason=distance column is representable by endpoint node columns, '
+                f'n_rows={span.n_rows}, '
+                f'n_components={span.n_components}, '
+                'identifiability_method=endpoint_graph_distance_span, '
+                f'consistency_tolerance_m={span.consistency_tolerance_m:.6g}, '
+                f'max_consistency_error_m={span.max_consistency_error_m:.6g}'
+            )
 
     observation_matrix = design.matrix[used_rows].tocsr()
     observation_rhs = np.ascontiguousarray(design.rhs_s[used_rows], dtype=np.float64)
@@ -1173,6 +1202,120 @@ def _validate_physical_identifiability(
             f'failure_reason={diagnostic.failure_reason}'
         )
     return diagnostic
+
+
+def _distance_column_is_in_endpoint_node_span(
+    *,
+    source_node_col: np.ndarray,
+    receiver_node_col: np.ndarray,
+    distance_m: np.ndarray,
+    n_node_columns: int,
+    rtol: float,
+) -> _EndpointDistanceSpanDiagnostic:
+    source = np.asarray(source_node_col)
+    receiver = np.asarray(receiver_node_col)
+    distance = np.asarray(distance_m, dtype=np.float64)
+    if source.ndim != 1:
+        raise RefractionStaticSolverError('source_node_col must be 1-dimensional')
+    if receiver.ndim != 1:
+        raise RefractionStaticSolverError('receiver_node_col must be 1-dimensional')
+    if distance.ndim != 1:
+        raise RefractionStaticSolverError('distance_m must be 1-dimensional')
+    if source.shape != receiver.shape or source.shape != distance.shape:
+        raise RefractionStaticSolverError('endpoint distance span input shape mismatch')
+    if source.size == 0:
+        raise RefractionStaticSolverError(
+            'endpoint distance span check requires at least one row'
+        )
+    if not np.issubdtype(source.dtype, np.integer):
+        raise RefractionStaticSolverError('source_node_col must contain integers')
+    if not np.issubdtype(receiver.dtype, np.integer):
+        raise RefractionStaticSolverError('receiver_node_col must contain integers')
+    if not np.isfinite(rtol) or rtol <= 0.0:
+        raise RefractionStaticSolverError('solver.identifiability_rtol must be positive finite')
+    n_nodes = int(n_node_columns)
+    if n_nodes <= 0:
+        raise RefractionStaticSolverError('n_node_columns must be positive')
+    source = np.ascontiguousarray(source, dtype=np.int64)
+    receiver = np.ascontiguousarray(receiver, dtype=np.int64)
+    if (
+        np.any(source < 0)
+        or np.any(receiver < 0)
+        or np.any(source >= n_nodes)
+        or np.any(receiver >= n_nodes)
+    ):
+        raise RefractionStaticSolverError('endpoint node column out of range')
+    if not np.all(np.isfinite(distance)):
+        raise RefractionStaticSolverError('distance_m must contain only finite values')
+
+    distance_scale = max(1.0, float(np.max(np.abs(distance))))
+    tolerance = max(
+        64.0 * np.finfo(np.float64).eps * distance_scale,
+        float(rtol) * distance_scale,
+    )
+    adjacency: list[list[tuple[int, int, float]]] = [[] for _ in range(n_nodes)]
+    for row, (u_raw, v_raw, d_raw) in enumerate(zip(source, receiver, distance)):
+        u = int(u_raw)
+        v = int(v_raw)
+        d = float(d_raw)
+        adjacency[u].append((row, v, d))
+        if v != u:
+            adjacency[v].append((row, u, d))
+
+    sign = np.zeros(n_nodes, dtype=np.int8)
+    offset = np.zeros(n_nodes, dtype=np.float64)
+    component_t: list[float | None] = []
+    n_components = 0
+    max_error = 0.0
+    conflicting_row: int | None = None
+    representable = True
+
+    for root, edges in enumerate(adjacency):
+        if not edges or sign[root] != 0:
+            continue
+        component_index = n_components
+        n_components += 1
+        component_t.append(None)
+        sign[root] = 1
+        offset[root] = 0.0
+        stack = [root]
+        while stack:
+            u = stack.pop()
+            for row, v, d in adjacency[u]:
+                expected_sign = -int(sign[u])
+                expected_offset = d - float(offset[u])
+                if sign[v] == 0:
+                    sign[v] = expected_sign
+                    offset[v] = expected_offset
+                    stack.append(v)
+                    continue
+
+                if int(sign[v]) == expected_sign:
+                    error = abs(float(offset[u]) + float(offset[v]) - d)
+                else:
+                    rhs = d - float(offset[u]) - float(offset[v])
+                    required_t = rhs / (2.0 * float(sign[u]))
+                    current_t = component_t[component_index]
+                    if current_t is None:
+                        component_t[component_index] = required_t
+                        error = 0.0
+                    else:
+                        error = abs(2.0 * float(sign[u]) * current_t - rhs)
+                if error > max_error:
+                    max_error = float(error)
+                if error > tolerance:
+                    if conflicting_row is None:
+                        conflicting_row = int(row)
+                    representable = False
+
+    return _EndpointDistanceSpanDiagnostic(
+        representable=bool(representable),
+        n_components=int(n_components),
+        n_rows=int(source.size),
+        consistency_tolerance_m=float(tolerance),
+        conflicting_row_index=conflicting_row,
+        max_consistency_error_m=float(max_error),
+    )
 
 
 def _column_scaled_numerical_rank(

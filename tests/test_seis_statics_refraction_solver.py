@@ -937,7 +937,7 @@ def test_refraction_solver_rejects_global_slowness_underdetermined() -> None:
 
     with pytest.raises(
         RefractionStaticSolverError,
-        match='solve_global.*expected_rank=2.*actual_rank=1.*gauge_nullity=1',
+        match='not identifiable.*distance column is representable',
     ):
         solve_refraction_static_design_least_squares(
             design,
@@ -986,7 +986,10 @@ def test_refraction_solver_rejects_duplicate_rows_missed_by_pattern_rank() -> No
         n_traces=2,
     )
 
-    with pytest.raises(RefractionStaticSolverError, match='actual_rank=1'):
+    with pytest.raises(
+        RefractionStaticSolverError,
+        match='not identifiable.*distance column is representable',
+    ):
         solve_refraction_static_design_least_squares(
             design,
             model=_model(mode='solve_global'),
@@ -1673,15 +1676,223 @@ def test_refraction_solver_large_sparse_global_slowness_duplicate_path_regressio
         n_traces=n_nodes,
     )
 
+    q = np.full(n_nodes, 250.0, dtype=np.float64)
+    np.testing.assert_allclose(
+        q[design.source_node_col] + q[design.receiver_node_col],
+        distance_m,
+    )
+
     with pytest.raises(
         RefractionStaticSolverError,
-        match='certification unavailable',
+        match='not identifiable.*distance column is representable',
     ):
         solve_refraction_static_design_least_squares(
             design,
             model=_model(mode='solve_global'),
             solver_options=_solver_options(),
         )
+
+
+def test_refraction_solver_endpoint_distance_span_constant_path() -> None:
+    diagnostic = solver_module._distance_column_is_in_endpoint_node_span(
+        source_node_col=np.arange(4, dtype=np.int64),
+        receiver_node_col=np.arange(1, 5, dtype=np.int64),
+        distance_m=np.full(4, 500.0, dtype=np.float64),
+        n_node_columns=5,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.representable
+    assert diagnostic.n_components == 1
+    assert diagnostic.max_consistency_error_m <= diagnostic.consistency_tolerance_m
+
+
+def test_refraction_solver_endpoint_distance_span_duplicate_edge_same_distance() -> None:
+    diagnostic = solver_module._distance_column_is_in_endpoint_node_span(
+        source_node_col=np.asarray([0, 0], dtype=np.int64),
+        receiver_node_col=np.asarray([1, 1], dtype=np.int64),
+        distance_m=np.asarray([500.0, 500.0], dtype=np.float64),
+        n_node_columns=2,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.representable
+
+
+def test_refraction_solver_endpoint_distance_span_duplicate_edge_conflict() -> None:
+    diagnostic = solver_module._distance_column_is_in_endpoint_node_span(
+        source_node_col=np.asarray([0, 0], dtype=np.int64),
+        receiver_node_col=np.asarray([1, 1], dtype=np.int64),
+        distance_m=np.asarray([500.0, 700.0], dtype=np.float64),
+        n_node_columns=2,
+        rtol=1.0e-10,
+    )
+
+    assert not diagnostic.representable
+    assert diagnostic.conflicting_row_index is not None
+    assert diagnostic.max_consistency_error_m > diagnostic.consistency_tolerance_m
+
+
+def test_refraction_solver_endpoint_distance_span_odd_cycle_triangle() -> None:
+    diagnostic = solver_module._distance_column_is_in_endpoint_node_span(
+        source_node_col=np.asarray([0, 1, 2], dtype=np.int64),
+        receiver_node_col=np.asarray([1, 2, 0], dtype=np.int64),
+        distance_m=np.asarray([500.0, 600.0, 700.0], dtype=np.float64),
+        n_node_columns=3,
+        rtol=1.0e-10,
+    )
+
+    assert diagnostic.representable
+    assert diagnostic.n_components == 1
+
+
+def test_refraction_solver_endpoint_distance_span_even_cycle_consistency() -> None:
+    representable = solver_module._distance_column_is_in_endpoint_node_span(
+        source_node_col=np.asarray([0, 1, 2, 3], dtype=np.int64),
+        receiver_node_col=np.asarray([1, 2, 3, 0], dtype=np.int64),
+        distance_m=np.asarray([500.0, 600.0, 700.0, 600.0], dtype=np.float64),
+        n_node_columns=4,
+        rtol=1.0e-10,
+    )
+    inconsistent = solver_module._distance_column_is_in_endpoint_node_span(
+        source_node_col=np.asarray([0, 1, 2, 3], dtype=np.int64),
+        receiver_node_col=np.asarray([1, 2, 3, 0], dtype=np.int64),
+        distance_m=np.asarray([500.0, 600.0, 700.0, 800.0], dtype=np.float64),
+        n_node_columns=4,
+        rtol=1.0e-10,
+    )
+
+    assert representable.representable
+    assert not inconsistent.representable
+    assert inconsistent.conflicting_row_index is not None
+
+
+def test_refraction_solver_endpoint_distance_span_disconnected_conflict() -> None:
+    diagnostic = solver_module._distance_column_is_in_endpoint_node_span(
+        source_node_col=np.asarray([0, 2, 2], dtype=np.int64),
+        receiver_node_col=np.asarray([1, 3, 3], dtype=np.int64),
+        distance_m=np.asarray([500.0, 500.0, 700.0], dtype=np.float64),
+        n_node_columns=4,
+        rtol=1.0e-10,
+    )
+
+    assert not diagnostic.representable
+    assert diagnostic.n_components == 2
+
+
+def test_refraction_solver_endpoint_distance_span_rejects_robust_candidate_mask() -> None:
+    source_node_id = np.asarray([0, 1, 2, 0], dtype=np.int64)
+    receiver_node_id = np.asarray([1, 2, 0, 1], dtype=np.int64)
+    distance_m = np.asarray([500.0, 600.0, 700.0, 800.0], dtype=np.float64)
+    pick_time = np.asarray([0.25, 0.28, 0.31, 0.50], dtype=np.float64)
+    design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(4, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([0, 1, 2], dtype=np.int64),
+        bedrock_velocity_mode='solve_global',
+        n_traces=4,
+    )
+    system = build_refraction_static_solver_system(
+        design,
+        model=_model(mode='solve_global'),
+        solver_options=_solver_options(),
+    )
+    candidate_mask = np.asarray([True, True, True, False], dtype=bool)
+
+    with pytest.raises(
+        RefractionStaticSolverError,
+        match='distance column is representable by endpoint node columns',
+    ):
+        solver_module._rebuild_refraction_static_solver_system_for_row_mask(
+            design=design,
+            system=system,
+            row_used_mask=candidate_mask,
+        )
+
+    rejected = solver_module._safe_rejection_rows(
+        design=design,
+        system=system,
+        initial_row_mask=np.ones(4, dtype=bool),
+        current_row_mask=np.ones(4, dtype=bool),
+        candidate_rows=np.asarray([3], dtype=np.int64),
+        min_used_fraction=0.5,
+        min_used_observations=1,
+    )
+
+    assert rejected.size == 0
+
+
+def test_refraction_solver_endpoint_distance_span_precheck_only_solve_global(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_precheck(**_: object) -> solver_module._EndpointDistanceSpanDiagnostic:
+        raise AssertionError('endpoint span precheck should not run')
+
+    monkeypatch.setattr(
+        solver_module,
+        '_distance_column_is_in_endpoint_node_span',
+        fail_precheck,
+    )
+    source_node_id = np.asarray([0, 1, 2], dtype=np.int64)
+    receiver_node_id = np.asarray([1, 2, 0], dtype=np.int64)
+    distance_m = np.asarray([500.0, 600.0, 700.0], dtype=np.float64)
+    pick_time = np.asarray([0.25, 0.28, 0.31], dtype=np.float64)
+    fixed_design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(3, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([0, 1, 2], dtype=np.int64),
+        bedrock_velocity_mode='fixed_global',
+        fixed_bedrock_velocity_m_s=2500.0,
+        n_traces=3,
+    )
+    build_refraction_static_solver_system(
+        fixed_design,
+        model=_model(mode='fixed_global', fixed_velocity=2500.0),
+        solver_options=_solver_options(),
+    )
+
+    cell_design = build_refraction_static_design_matrix_from_arrays(
+        pick_time_s_sorted=pick_time,
+        valid_observation_mask_sorted=np.ones(3, dtype=bool),
+        source_node_id_sorted=source_node_id,
+        receiver_node_id_sorted=receiver_node_id,
+        distance_m_sorted=distance_m,
+        node_id=np.asarray([0, 1, 2], dtype=np.int64),
+        bedrock_velocity_mode='solve_cell',
+        midpoint_cell_id_sorted=np.zeros(3, dtype=np.int64),
+        n_total_cells=1,
+        number_of_cell_x=1,
+        number_of_cell_y=1,
+        cell_assignment_mode='midpoint',
+        n_traces=3,
+    )
+    n_parameters = int(cell_design.n_parameters)
+    try:
+        solver_module._build_refraction_static_solver_system_from_parts(
+            design=cell_design,
+            row_used_mask=None,
+            lower_bounds=np.zeros(n_parameters, dtype=np.float64),
+            upper_bounds=np.full(n_parameters, np.inf, dtype=np.float64),
+            initial_parameter_vector=np.zeros(n_parameters, dtype=np.float64),
+            smoothing_rows=None,
+            damping_matrix=sparse.csr_matrix((0, n_parameters), dtype=np.float64),
+            damping_rhs=np.empty(0, dtype=np.float64),
+            half_intercept_damping_lambda=0.0,
+            identifiability_rtol=1.0e-10,
+            node_lower_bound_s=0.0,
+            node_upper_bound_s=0.1,
+            slowness_lower_bound_s_per_m=1.0 / 6000.0,
+            slowness_upper_bound_s_per_m=1.0 / 1200.0,
+            initial_bedrock_slowness_s_per_m=1.0 / 3000.0,
+        )
+    except RefractionStaticSolverError:
+        pass
 
 
 def test_refraction_solver_large_sparse_global_slowness_distance_variation_is_certified_without_densifying(
